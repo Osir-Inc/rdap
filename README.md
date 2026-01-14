@@ -99,7 +99,7 @@ sudo apk add jq
 rdap osir.com
 
 # IP address lookup (IPv4 or IPv6)
-rdap 8.8.8.8
+rdap 91.239.6.69
 rdap 2001:4860:4860::8888
 
 # ASN lookup
@@ -161,19 +161,59 @@ rdap -t help -s https://rdap.verisign.com/com/v1
 
 # Entity lookup
 rdap -t entity -s https://rdap.arin.net/registry ARIN
-
-# Domain search (with wildcards)
-rdap -t domain-search -s https://rdap.verisign.com/com/v1 'osir*.com'
-
-# Domain search by nameserver
-rdap -t domain-search-by-ns -s https://rdap.verisign.com/com/v1 ns1.osir.com
-
-# Nameserver search
-rdap -t ns-search -s https://rdap.verisign.com/com/v1 'ns*.osir.com'
-
-# Entity search
-rdap -t entity-search -s https://rdap.arin.net/registry 'Osir*'
 ```
+
+### Search Queries
+
+> **Note:** Search operations are optional in RDAP and not supported by all servers.
+> Verisign (.com/.net) does NOT support searches. RIPE and ARIN support entity searches.
+
+```bash
+# Entity search (ARIN supports this)
+rdap -t entity-search -s https://rdap.arin.net/registry 'Osir*'
+
+# Entity search by handle
+rdap -t entity-search-by-handle -s https://rdap.arin.net/registry 'OSIR*'
+```
+
+### RIPE Database Queries
+
+RIPE NCC provides RDAP access to European IP allocations, ASNs, and reverse DNS.
+
+```bash
+# IP lookup (91.239.6.69 is in RIPE region)
+rdap 91.239.6.69
+
+# Direct RIPE query with specific server
+rdap -s https://rdap.db.ripe.net 91.239.6.69
+
+# ASN lookup via RIPE
+rdap -s https://rdap.db.ripe.net/autnum/3333
+
+# Entity lookup (organisation, person, maintainer)
+rdap -t entity -s https://rdap.db.ripe.net ORG-HA94-RIPE
+rdap -t entity -s https://rdap.db.ripe.net RIPE-NCC-MNT
+
+# Reverse DNS domain search (RIPE only has reverse domains)
+rdap -t domain-search -s https://rdap.db.ripe.net '6.239.91.in-addr.arpa'
+
+# Entity search by name
+rdap -t entity-search -s https://rdap.db.ripe.net 'Osir'
+
+# Entity search by handle
+rdap -t entity-search-by-handle -s https://rdap.db.ripe.net 'ORG-HA*'
+
+# RIPE help/capabilities
+rdap -t help -s https://rdap.db.ripe.net
+```
+
+**RIPE Object Types:**
+| Type | Description | Example |
+|------|-------------|---------|
+| ip | IPv4/IPv6 allocations | `rdap -s https://rdap.db.ripe.net 91.239.6.69` |
+| autnum | AS Numbers | `rdap -s https://rdap.db.ripe.net/autnum/3333` |
+| entity | Person, Role, Org, Maintainer | `rdap -t entity -s https://rdap.db.ripe.net ORG-HA94-RIPE` |
+| domain | Reverse DNS only | `rdap -t domain -s https://rdap.db.ripe.net 6.239.91.in-addr.arpa` |
 
 ---
 
@@ -201,6 +241,8 @@ ADVANCED QUERY TYPES (require -t and -s flags):
     ns, nameserver                  Nameserver lookup
     help                            Server capabilities
     entity                          Entity/contact lookup
+
+SEARCH QUERY TYPES (not supported by all servers):
     domain-search                   Search domains by name pattern
     domain-search-by-ns             Search domains by nameserver
     domain-search-by-ns-ip          Search domains by nameserver IP
@@ -274,6 +316,23 @@ Status:      active
 Country:     US
 ```
 
+### IP Output (RIPE)
+
+```
+$ rdap 91.239.6.69
+
+IP Information
+────────────────────────────────────────
+Handle:      91.239.6.0 - 91.239.6.255
+Range:       91.239.6.0 - 91.239.6.255
+Name:        AL-HOSTAL-20240807
+Type:        ASSIGNED PA
+Country:     AL
+Status:      active
+Created:     2024-08-07T07:18:31Z
+Updated:     2024-08-07T07:18:31Z
+```
+
 ### Raw JSON Output (-r flag)
 
 ```bash
@@ -286,17 +345,17 @@ $ rdap -r osir.com | jq '.nameservers[].ldhName'
 
 ## Common RDAP Servers
 
-| TLD/Region | Server URL |
-|------------|------------|
-| .com, .net | https://rdap.verisign.com/com/v1 |
-| .org | https://rdap.publicinterestregistry.org/rdap |
-| .io | https://rdap.nic.io |
-| .co | https://rdap.nic.co |
-| ARIN (Americas) | https://rdap.arin.net/registry |
-| RIPE (Europe) | https://rdap.db.ripe.net |
-| APNIC (Asia-Pacific) | https://rdap.apnic.net |
-| LACNIC (Latin America) | https://rdap.lacnic.net/rdap |
-| AFRINIC (Africa) | https://rdap.afrinic.net/rdap |
+| Registry/RIR | Server URL | Notes |
+|------------|------------|-------|
+| Verisign (.com, .net) | https://rdap.verisign.com/com/v1 | No search support |
+| PIR (.org) | https://rdap.publicinterestregistry.org/rdap | |
+| .io | https://rdap.nic.io | |
+| .co | https://rdap.nic.co | |
+| **RIPE** (Europe) | https://rdap.db.ripe.net | Entity & domain search |
+| ARIN (Americas) | https://rdap.arin.net/registry | Entity search |
+| APNIC (Asia-Pacific) | https://rdap.apnic.net | |
+| LACNIC (Latin America) | https://rdap.lacnic.net/rdap | |
+| AFRINIC (Africa) | https://rdap.afrinic.net/rdap | |
 
 ---
 
@@ -355,6 +414,16 @@ Use verbose mode:
 ```bash
 rdap -v osir.com
 ```
+
+### Search queries return errors
+
+Search operations (domain-search, entity-search, etc.) are **optional** in RDAP and not supported by all servers:
+
+- **Verisign** (.com, .net): Does NOT support searches
+- **ARIN**: Supports entity searches
+- **Some registrars**: May support domain searches
+
+If you get "Bad request" or "Not implemented" errors, the server doesn't support that search type.
 
 ---
 

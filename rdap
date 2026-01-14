@@ -11,7 +11,7 @@
 #   rdap AS13335
 #
 
-VERSION="1.3.6"
+VERSION="1.3.8"
 CACHE_DIR="${XDG_CACHE_HOME:-$HOME/.cache}/rdap"
 CACHE_TTL=86400  # 24 hours
 
@@ -108,7 +108,7 @@ usage() {
     printf "\n"
     printf "%bBASIC QUERY TYPES (auto-detected):%b\n" "$BOLD" "$NC"
     printf "    domain      rdap osir.com\n"
-    printf "    IPv4        rdap 8.8.8.8\n"
+    printf "    IPv4        rdap 91.239.6.69\n"
     printf "    IPv6        rdap 2001:4860:4860::8888\n"
     printf "    ASN         rdap AS11867 or rdap 11867\n"
     printf "\n"
@@ -116,13 +116,11 @@ usage() {
     printf "    nameserver                      rdap -t ns -s <server> ns1.osir.com\n"
     printf "    help                            rdap -t help -s <server>\n"
     printf "    entity                          rdap -t entity -s <server> HANDLE\n"
-    printf "    domain-search                   rdap -t domain-search -s <server> 'osir*.com'\n"
-    printf "    domain-search-by-ns             rdap -t domain-search-by-ns -s <server> ns1.osir.com\n"
-    printf "    domain-search-by-ns-ip          rdap -t domain-search-by-ns-ip -s <server> 192.0.2.1\n"
-    printf "    nameserver-search               rdap -t ns-search -s <server> 'ns*.osir.com'\n"
-    printf "    nameserver-search-by-ip         rdap -t ns-search-by-ip -s <server> 192.0.2.1\n"
-    printf "    entity-search                   rdap -t entity-search -s <server> 'Osir*'\n"
-    printf "    entity-search-by-handle         rdap -t entity-search-by-handle -s <server> 'OSIR*'\n"
+    printf "\n"
+    printf "  %bSearch queries (supported by some servers):%b\n" "$YELLOW" "$NC"
+    printf "    domain-search                   rdap -t domain-search -s <server> 'pattern'\n"
+    printf "    entity-search                   rdap -t entity-search -s <server> 'Name'\n"
+    printf "    entity-search-by-handle         rdap -t entity-search-by-handle -s <server> 'HANDLE'\n"
     printf "\n"
     printf "%bOPTIONS:%b\n" "$BOLD" "$NC"
     printf "    -t, --type      Query type (see above)\n"
@@ -135,14 +133,29 @@ usage() {
     printf "    --clear-cache   Clear bootstrap cache\n"
     printf "\n"
     printf "%bEXAMPLES:%b\n" "$BOLD" "$NC"
-    printf "    rdap osir.com\n"
-    printf "    rdap -f osir.com\n"
-    printf "    rdap -R osir.com                   # Follow registrar link for full data\n"
-    printf "    rdap -R -f osir.com                # Full output from registrar\n"
-    printf "    rdap AS11867\n"
-    printf "    rdap -t ns -s https://rdap.verisign.com/com/v1 ns1.osir.com\n"
-    printf "    rdap -t help -s https://rdap.verisign.com/com/v1\n"
-    printf "    rdap -t domain-search -s https://rdap.verisign.com/com/v1 'osir*.com'\n"
+    printf "    rdap osir.com                      # Domain lookup\n"
+    printf "    rdap -f osir.com                   # Full domain output\n"
+    printf "    rdap -R osir.com                   # Follow registrar for full data\n"
+    printf "    rdap AS11867                       # ASN lookup\n"
+    printf "    rdap 91.239.6.69                   # IP lookup (auto-detects RIPE)\n"
+    printf "    rdap -s https://rdap.osir.com/rdap osir.com\n"
+    printf "\n"
+    printf "  %bRIPE Database examples:%b\n" "$CYAN" "$NC"
+    printf "    rdap -s https://rdap.db.ripe.net ip/91.239.6.69\n"
+    printf "    rdap -t entity -s https://rdap.db.ripe.net ORG-HA94-RIPE\n"
+    printf "    rdap -t help -s https://rdap.db.ripe.net\n"
+    printf "    rdap -t domain-search -s https://rdap.db.ripe.net '6.239.91.in-addr.arpa'\n"
+    printf "    rdap -t entity-search -s https://rdap.db.ripe.net 'Osir'\n"
+    printf "\n"
+    printf "%bRDAP SERVERS:%b\n" "$BOLD" "$NC"
+    printf "    Verisign (.com/.net)    https://rdap.verisign.com/com/v1\n"
+    printf "    RIPE (Europe IPs/ASNs)  https://rdap.db.ripe.net\n"
+    printf "    ARIN (Americas)         https://rdap.arin.net/registry\n"
+    printf "    APNIC (Asia-Pacific)    https://rdap.apnic.net\n"
+    printf "\n"
+    printf "%bNOTE:%b Search queries are not supported by all RDAP servers.\n" "$YELLOW" "$NC"
+    printf "      RIPE supports domain search (reverse DNS only) and entity search.\n"
+    printf "      Verisign (.com/.net) does not support searches.\n"
     printf "\n"
     exit 0
 }
@@ -1378,9 +1391,6 @@ main() {
     info "  SERVER: '$SERVER'"
     info "  QUERY: '$QUERY'"
     
-    # Normalize query
-    [ -n "$QUERY" ] && QUERY=$(echo "$QUERY" | tr '[:upper:]' '[:lower:]')
-    
     # Use explicit type if provided, otherwise detect
     local type
     if [ -n "$QUERY_TYPE" ]; then
@@ -1396,6 +1406,16 @@ main() {
     else
         type=$(detect_type "$QUERY")
         info "Query type (detected): $type"
+    fi
+    
+    # Normalize query - only lowercase domain queries (entity handles are case-sensitive)
+    if [ -n "$QUERY" ]; then
+        case "$type" in
+            domain|ip|asn|nameserver)
+                QUERY=$(echo "$QUERY" | tr '[:upper:]' '[:lower:]')
+                ;;
+            # entity, entity-search, entity-search-by-handle, domain-search preserve case
+        esac
     fi
     
     # Find server if not specified (for basic types)
