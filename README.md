@@ -191,17 +191,17 @@ rdap -s https://rdap.db.ripe.net 91.239.6.69
 rdap -s https://rdap.db.ripe.net/autnum/3333
 
 # Entity lookup (organisation, person, maintainer)
-rdap -t entity -s https://rdap.db.ripe.net ORG-HA94-RIPE
+rdap -t entity -s https://rdap.db.ripe.net ORG-HS382-RIPE
 rdap -t entity -s https://rdap.db.ripe.net RIPE-NCC-MNT
 
 # Reverse DNS domain search (RIPE only has reverse domains)
 rdap -t domain-search -s https://rdap.db.ripe.net '6.239.91.in-addr.arpa'
 
 # Entity search by name
-rdap -t entity-search -s https://rdap.db.ripe.net 'Osir'
+rdap -t entity-search -s https://rdap.db.ripe.net 'Host.AL'
 
 # Entity search by handle
-rdap -t entity-search-by-handle -s https://rdap.db.ripe.net 'ORG-HA*'
+rdap -t entity-search-by-handle -s https://rdap.db.ripe.net 'ORG-HS*'
 
 # RIPE help/capabilities
 rdap -t help -s https://rdap.db.ripe.net
@@ -212,7 +212,7 @@ rdap -t help -s https://rdap.db.ripe.net
 |------|-------------|---------|
 | ip | IPv4/IPv6 allocations | `rdap -s https://rdap.db.ripe.net 91.239.6.69` |
 | autnum | AS Numbers | `rdap -s https://rdap.db.ripe.net/autnum/3333` |
-| entity | Person, Role, Org, Maintainer | `rdap -t entity -s https://rdap.db.ripe.net ORG-HA94-RIPE` |
+| entity | Person, Role, Org, Maintainer | `rdap -t entity -s https://rdap.db.ripe.net ORG-HS382-RIPE` |
 | domain | Reverse DNS only | `rdap -t domain -s https://rdap.db.ripe.net 6.239.91.in-addr.arpa` |
 
 ---
