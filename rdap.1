@@ -1,0 +1,102 @@
+.TH RDAP 1 "January 2025" "rdap 1.3.4" "User Commands"
+.SH NAME
+rdap \- simple RDAP client for querying domain, IP, and ASN registration data
+.SH SYNOPSIS
+.B rdap
+[\fIOPTIONS\fR] \fIquery\fR
+.SH DESCRIPTION
+.B rdap
+is a lightweight RDAP (Registration Data Access Protocol) client that queries
+registration data for domains, IP addresses, and autonomous system numbers (ASNs).
+It requires only curl and optionally jq for formatted output.
+.SH OPTIONS
+.TP
+.BR \-t ", " \-\-type " " \fItype\fR
+Specify query type. Required for advanced queries. Types: ns, help, entity,
+domain-search, domain-search-by-ns, domain-search-by-ns-ip, ns-search,
+ns-search-by-ip, entity-search, entity-search-by-handle.
+.TP
+.BR \-f ", " \-\-full
+Full detailed output including all entities, events, and notices.
+.TP
+.BR \-R ", " \-\-registrar
+Follow registrar RDAP link to get complete contact data (registrant, tech, admin).
+.TP
+.BR \-r ", " \-\-raw
+Output raw JSON response.
+.TP
+.BR \-s ", " \-\-server " " \fIurl\fR
+Use specific RDAP server URL. Required for advanced query types.
+.TP
+.BR \-v ", " \-\-verbose
+Verbose output showing debug information.
+.TP
+.BR \-h ", " \-\-help
+Display help message and exit.
+.TP
+.BR \-\-clear\-cache
+Clear the IANA bootstrap cache.
+.SH QUERY TYPES
+Query types are auto-detected for basic queries:
+.TP
+.B domain
+Any string containing a dot (e.g., example.com)
+.TP
+.B IPv4
+Dotted decimal notation (e.g., 8.8.8.8)
+.TP
+.B IPv6
+Colon-separated notation (e.g., 2001:4860:4860::8888)
+.TP
+.B ASN
+AS followed by number, or number > 255 (e.g., AS13335 or 13335)
+.SH EXAMPLES
+.TP
+Basic domain lookup:
+.B rdap example.com
+.TP
+Full output:
+.B rdap -f example.com
+.TP
+Follow registrar for complete data:
+.B rdap -R example.com
+.TP
+IP address lookup:
+.B rdap 8.8.8.8
+.TP
+ASN lookup:
+.B rdap AS13335
+.TP
+Nameserver lookup:
+.B rdap -t ns -s https://rdap.verisign.com/com/v1 ns1.google.com
+.TP
+Domain search:
+.B rdap -t domain-search -s https://rdap.verisign.com/com/v1 'exam*.com'
+.SH FILES
+.TP
+.I ~/.cache/rdap/
+Cache directory for IANA bootstrap data (24 hour TTL).
+.SH ENVIRONMENT
+.TP
+.B XDG_CACHE_HOME
+If set, cache is stored in $XDG_CACHE_HOME/rdap instead of ~/.cache/rdap.
+.SH EXIT STATUS
+.TP
+.B 0
+Success
+.TP
+.B 1
+Error (connection failure, not found, invalid query, etc.)
+.SH SEE ALSO
+.BR whois (1),
+.BR dig (1),
+.BR curl (1),
+.BR jq (1)
+.PP
+RDAP Protocol: RFC 7480-7484
+.br
+IANA RDAP Bootstrap: https://data.iana.org/rdap/
+.SH AUTHOR
+Written for Host.al / Osir, Inc.
+.SH BUGS
+Report bugs at: https://github.com/your-repo/rdap/issues

@@ -1,0 +1,1501 @@
+#!/bin/bash
+#
+# Simple RDAP Client for Linux
+# Requires only: curl (pre-installed on most systems)
+# Optional: jq (for prettier output)
+#
+# Usage: rdap <domain|ip|asn>
+# Examples:
+#   rdap example.com
+#   rdap 8.8.8.8
+#   rdap AS13335
+#
+
+VERSION="1.3.5"
+CACHE_DIR="${XDG_CACHE_HOME:-$HOME/.cache}/rdap"
+CACHE_TTL=86400  # 24 hours
+
+# Global state flags
+RAW_OUTPUT=0
+FULL_OUTPUT=0
+FOLLOW_REGISTRAR=0
+VERBOSE=0
+
+# Colors (disabled if not a terminal)
+if [ -t 1 ]; then
+    RED='\033[0;31m'
+    GREEN='\033[0;32m'
+    YELLOW='\033[0;33m'
+    BLUE='\033[0;34m'
+    CYAN='\033[0;36m'
+    BOLD='\033[1m'
+    NC='\033[0m'
+else
+    RED=''
+    GREEN=''
+    YELLOW=''
+    BLUE=''
+    CYAN=''
+    BOLD=''
+    NC=''
+fi
+
+# Common RDAP servers (fallback when bootstrap fails)
+declare -A RDAP_SERVERS
+RDAP_SERVERS=(
+    # gTLDs
+    ["com"]="https://rdap.verisign.com/com/v1/"
+    ["net"]="https://rdap.verisign.com/net/v1/"
+    ["org"]="https://rdap.publicinterestregistry.org/rdap/"
+    ["info"]="https://rdap.afilias.net/rdap/info/"
+    ["biz"]="https://rdap.afilias.net/rdap/biz/"
+    ["io"]="https://rdap.nic.io/"
+    ["co"]="https://rdap.nic.co/"
+    ["me"]="https://rdap.nic.me/"
+    ["tv"]="https://rdap.nic.tv/"
+    ["cc"]="https://rdap.verisign.com/cc/v1/"
+    ["xyz"]="https://rdap.centralnic.com/xyz/"
+    ["online"]="https://rdap.centralnic.com/online/"
+    ["site"]="https://rdap.centralnic.com/site/"
+    ["tech"]="https://rdap.centralnic.com/tech/"
+    ["store"]="https://rdap.centralnic.com/store/"
+    ["app"]="https://rdap.nic.google/"
+    ["dev"]="https://rdap.nic.google/"
+    ["page"]="https://rdap.nic.google/"
+    ["cloud"]="https://rdap.donuts.co/rdap/"
+    # ccTLDs
+    ["al"]="https://rdap.nic.al/"
+    ["uk"]="https://rdap.nominet.uk/uk/"
+    ["de"]="https://rdap.denic.de/"
+    ["nl"]="https://rdap.sidn.nl/"
+    ["eu"]="https://rdap.eurid.eu/"
+    ["fr"]="https://rdap.nic.fr/"
+    ["it"]="https://rdap.nic.it/"
+    ["es"]="https://rdap.nic.es/"
+    ["pl"]="https://rdap.dns.pl/"
+    ["cz"]="https://rdap.nic.cz/"
+    ["ch"]="https://rdap.nic.ch/"
+    ["at"]="https://rdap.nic.at/"
+    ["be"]="https://rdap.dns.be/"
+    ["se"]="https://rdap.iis.se/"
+    ["no"]="https://rdap.norid.no/"
+    ["dk"]="https://rdap.dk-hostmaster.dk/"
+    ["fi"]="https://rdap.fi/"
+    ["au"]="https://rdap.auda.org.au/"
+    ["nz"]="https://rdap.dnc.org.nz/"
+    ["ca"]="https://rdap.ca.fury.ca/rdap/"
+    ["br"]="https://rdap.registro.br/"
+    ["jp"]="https://rdap.jprs.jp/rdap/"
+    ["kr"]="https://rdap.kr/"
+    ["cn"]="https://rdap.cnnic.cn/"
+    ["ru"]="https://rdap.tcinet.ru/"
+    ["in"]="https://rdap.registry.in/"
+    ["id"]="https://rdap.pandi.id/"
+)
+
+# RIR servers for IP/ASN
+ARIN_RDAP="https://rdap.arin.net/registry/"
+RIPE_RDAP="https://rdap.db.ripe.net/"
+APNIC_RDAP="https://rdap.apnic.net/"
+LACNIC_RDAP="https://rdap.lacnic.net/rdap/"
+AFRINIC_RDAP="https://rdap.afrinic.net/rdap/"
+
+usage() {
+    printf "%brdap%b - Simple RDAP Client v${VERSION}\n" "$BOLD" "$NC"
+    printf "\n"
+    printf "%bUSAGE:%b\n" "$BOLD" "$NC"
+    printf "    rdap [OPTIONS] <query>\n"
+    printf "\n"
+    printf "%bBASIC QUERY TYPES (auto-detected):%b\n" "$BOLD" "$NC"
+    printf "    domain      rdap example.com\n"
+    printf "    IPv4        rdap 8.8.8.8\n"
+    printf "    IPv6        rdap 2001:4860:4860::8888\n"
+    printf "    ASN         rdap AS13335 or rdap 13335\n"
+    printf "\n"
+    printf "%bADVANCED QUERY TYPES (use -t flag):%b\n" "$BOLD" "$NC"
+    printf "    nameserver                      rdap -t ns -s <server> ns1.example.com\n"
+    printf "    help                            rdap -t help -s <server>\n"
+    printf "    entity                          rdap -t entity -s <server> HANDLE\n"
+    printf "    domain-search                   rdap -t domain-search -s <server> 'exam*.com'\n"
+    printf "    domain-search-by-ns             rdap -t domain-search-by-ns -s <server> ns1.example.com\n"
+    printf "    domain-search-by-ns-ip          rdap -t domain-search-by-ns-ip -s <server> 192.0.2.1\n"
+    printf "    nameserver-search               rdap -t ns-search -s <server> 'ns1.exam*'\n"
+    printf "    nameserver-search-by-ip         rdap -t ns-search-by-ip -s <server> 192.0.2.1\n"
+    printf "    entity-search                   rdap -t entity-search -s <server> 'Name*'\n"
+    printf "    entity-search-by-handle         rdap -t entity-search-by-handle -s <server> 'HANDLE*'\n"
+    printf "\n"
+    printf "%bOPTIONS:%b\n" "$BOLD" "$NC"
+    printf "    -t, --type      Query type (see above)\n"
+    printf "    -f, --full      Full detailed output (all entities, events, notices)\n"
+    printf "    -R, --registrar Follow registrar link for complete data (domains only)\n"
+    printf "    -r, --raw       Output raw JSON\n"
+    printf "    -s, --server    Use specific RDAP server URL (required for advanced queries)\n"
+    printf "    -v, --verbose   Verbose output\n"
+    printf "    -h, --help      Show this help\n"
+    printf "    --clear-cache   Clear bootstrap cache\n"
+    printf "\n"
+    printf "%bEXAMPLES:%b\n" "$BOLD" "$NC"
+    printf "    rdap google.com\n"
+    printf "    rdap -f cloudflare.com\n"
+    printf "    rdap -R namecheap.com              # Follow registrar link for full data\n"
+    printf "    rdap -R -f namecheap.com           # Full output from registrar\n"
+    printf "    rdap AS13335\n"
+    printf "    rdap -t ns -s https://rdap.verisign.com/com/v1 ns1.google.com\n"
+    printf "    rdap -t help -s https://rdap.verisign.com/com/v1\n"
+    printf "    rdap -t domain-search -s https://rdap.verisign.com/com/v1 'exam*.com'\n"
+    printf "\n"
+    exit 0
+}
+
+error() {
+    printf "%bError:%b %s\n" "$RED" "$NC" "$1" >&2
+    exit 1
+}
+
+info() {
+    [ "$VERBOSE" = "1" ] && printf "%bInfo:%b %s\n" "$CYAN" "$NC" "$1" >&2
+}
+
+warn() {
+    printf "%bWarning:%b %s\n" "$YELLOW" "$NC" "$1" >&2
+}
+
+# Check for curl
+command -v curl >/dev/null 2>&1 || error "curl is required but not installed"
+
+# Check for jq (optional)
+HAS_JQ=0
+command -v jq >/dev/null 2>&1 && HAS_JQ=1
+
+# Initialize cache directory
+mkdir -p "$CACHE_DIR" 2>/dev/null || true
+
+# Get TLD from domain
+get_tld() {
+    echo "$1" | awk -F. '{print $NF}' | tr '[:upper:]' '[:lower:]'
+}
+
+# Find RDAP server for domain
+find_domain_server() {
+    local domain="$1"
+    local tld=$(get_tld "$domain")
+    
+    info "Looking up RDAP server for TLD: $tld"
+    
+    # First check built-in list
+    if [ -n "${RDAP_SERVERS[$tld]}" ]; then
+        info "Found server in built-in list"
+        echo "${RDAP_SERVERS[$tld]}"
+        return 0
+    fi
+    
+    # Try IANA bootstrap
+    local bootstrap_url="https://data.iana.org/rdap/dns.json"
+    local cache_file="$CACHE_DIR/dns_bootstrap.json"
+    
+    # Check cache
+    if [ -f "$cache_file" ]; then
+        local age=$(($(date +%s) - $(stat -c %Y "$cache_file" 2>/dev/null || stat -f %m "$cache_file" 2>/dev/null || echo 0)))
+        if [ "$age" -lt "$CACHE_TTL" ]; then
+            info "Using cached bootstrap data"
+            local bootstrap=$(cat "$cache_file")
+            if [ "$HAS_JQ" = "1" ] && [ -n "$bootstrap" ]; then
+                local server=$(echo "$bootstrap" | jq -r --arg tld "$tld" '
+                    .services[] | select(.[0][] | ascii_downcase == $tld) | .[1][0]
+                ' 2>/dev/null | head -1)
+                if [ -n "$server" ] && [ "$server" != "null" ]; then
+                    echo "$server"
+                    return 0
+                fi
+            fi
+        fi
+    fi
+    
+    # Fetch fresh bootstrap
+    info "Fetching IANA bootstrap..."
+    local bootstrap
+    bootstrap=$(curl -sS --connect-timeout 10 --max-time 30 "$bootstrap_url" 2>/dev/null)
+    
+    if [ -n "$bootstrap" ]; then
+        echo "$bootstrap" > "$cache_file" 2>/dev/null
+        
+        if [ "$HAS_JQ" = "1" ]; then
+            local server=$(echo "$bootstrap" | jq -r --arg tld "$tld" '
+                .services[] | select(.[0][] | ascii_downcase == $tld) | .[1][0]
+            ' 2>/dev/null | head -1)
+            if [ -n "$server" ] && [ "$server" != "null" ]; then
+                echo "$server"
+                return 0
+            fi
+        fi
+    fi
+    
+    error "No RDAP server found for TLD: $tld (try adding -s <server_url>)"
+}
+
+# Find RDAP server for IP based on allocation
+find_ip_server() {
+    local ip="$1"
+    
+    # For simplicity, try ARIN first, then others
+    # A more complete implementation would check IP ranges
+    info "Using ARIN as default (will redirect if needed)"
+    echo "$ARIN_RDAP"
+}
+
+# Find RDAP server for ASN based on range
+find_asn_server() {
+    local asn="$1"
+    asn=$(echo "$asn" | sed 's/^[Aa][Ss]//')
+    
+    # ASN ranges (approximate)
+    # ARIN: 1-1876, 1902-2042, 2044-2046, etc.
+    # RIPE: 1877-1901, 2043, 2047-2106, etc.
+    # This is simplified - try ARIN first
+    info "Using ARIN as default for ASN lookup"
+    echo "$ARIN_RDAP"
+}
+
+# Detect query type
+detect_type() {
+    local query="$1"
+    
+    # ASN (AS12345 or just 12345 if small number)
+    if [[ "$query" =~ ^[Aa][Ss][0-9]+$ ]]; then
+        echo "asn"
+        return
+    fi
+    
+    # Pure number with reasonable ASN range
+    if [[ "$query" =~ ^[0-9]+$ ]] && [ "$query" -gt 255 ] 2>/dev/null; then
+        echo "asn"
+        return
+    fi
+    
+    # IPv6
+    if [[ "$query" == *:* ]]; then
+        echo "ip"
+        return
+    fi
+    
+    # IPv4
+    if [[ "$query" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+(/[0-9]+)?$ ]]; then
+        echo "ip"
+        return
+    fi
+    
+    # Domain (default)
+    echo "domain"
+}
+
+# Normalize query type aliases
+normalize_query_type() {
+    local type="$1"
+    case "$type" in
+        ns|nameserver)
+            echo "nameserver"
+            ;;
+        help)
+            echo "help"
+            ;;
+        entity)
+            echo "entity"
+            ;;
+        domain-search|domainsearch)
+            echo "domain-search"
+            ;;
+        domain-search-by-ns|domain-search-by-nameserver|domainsearchbyns)
+            echo "domain-search-by-ns"
+            ;;
+        domain-search-by-ns-ip|domain-search-by-nameserver-ip|domainsearchbynsip)
+            echo "domain-search-by-ns-ip"
+            ;;
+        ns-search|nameserver-search|nssearch)
+            echo "ns-search"
+            ;;
+        ns-search-by-ip|nameserver-search-by-ip|nssearchbyip)
+            echo "ns-search-by-ip"
+            ;;
+        entity-search|entitysearch)
+            echo "entity-search"
+            ;;
+        entity-search-by-handle|entitysearchbyhandle)
+            echo "entity-search-by-handle"
+            ;;
+        domain)
+            echo "domain"
+            ;;
+        ip)
+            echo "ip"
+            ;;
+        asn|autnum)
+            echo "asn"
+            ;;
+        *)
+            error "Unknown query type: $type"
+            ;;
+    esac
+}
+
+# Query RDAP server
+query_rdap() {
+    local server="$1"
+    local type="$2"
+    local query="$3"
+    
+    info "query_rdap called with:"
+    info "  server: '$server'"
+    info "  type: '$type'"
+    info "  query: '$query'"
+    
+    # Ensure server URL ends with /
+    [[ "$server" != */ ]] && server="${server}/"
+    
+    local url
+    case "$type" in
+        domain)
+            url="${server}domain/${query}"
+            ;;
+        ip)
+            url="${server}ip/${query}"
+            ;;
+        asn)
+            query=$(echo "$query" | sed 's/^[Aa][Ss]//')
+            url="${server}autnum/${query}"
+            ;;
+        nameserver)
+            url="${server}nameserver/${query}"
+            ;;
+        help)
+            url="${server}help"
+            ;;
+        entity)
+            url="${server}entity/${query}"
+            ;;
+        domain-search)
+            # URL encode the query for wildcards
+            local encoded=$(echo "$query" | sed 's/\*/%2A/g')
+            url="${server}domains?name=${encoded}"
+            ;;
+        domain-search-by-ns)
+            url="${server}domains?nsLdhName=${query}"
+            ;;
+        domain-search-by-ns-ip)
+            url="${server}domains?nsIp=${query}"
+            ;;
+        ns-search)
+            local encoded=$(echo "$query" | sed 's/\*/%2A/g')
+            url="${server}nameservers?name=${encoded}"
+            ;;
+        ns-search-by-ip)
+            url="${server}nameservers?ip=${query}"
+            ;;
+        entity-search)
+            local encoded=$(echo "$query" | sed 's/\*/%2A/g')
+            url="${server}entities?fn=${encoded}"
+            ;;
+        entity-search-by-handle)
+            local encoded=$(echo "$query" | sed 's/\*/%2A/g')
+            url="${server}entities?handle=${encoded}"
+            ;;
+    esac
+    
+    info "Querying: $url"
+    
+    local tmpfile=$(mktemp)
+    local http_code
+    
+    # Fetch with HTTP status code
+    http_code=$(curl -sS -L --connect-timeout 10 --max-time 30 -w "%{http_code}" -o "$tmpfile" "$url" 2>&1)
+    local response=$(cat "$tmpfile")
+    rm -f "$tmpfile"
+    
+    info "HTTP response code: $http_code"
+    
+    case "$http_code" in
+        200)
+            echo "$response"
+            ;;
+        404)
+            error "Not found: ${query:-$type}"
+            ;;
+        400)
+            error "Bad request - invalid query format"
+            ;;
+        429)
+            error "Rate limited - try again later"
+            ;;
+        000)
+            error "Connection failed - check network or server URL"
+            ;;
+        501)
+            error "Search not implemented by this server"
+            ;;
+        *)
+            error "Server returned HTTP $http_code"
+            ;;
+    esac
+}
+
+# Helper: Format entities in brief mode (for simple output)
+format_entities_brief() {
+    local json="$1"
+    
+    # Note: registrar is shown separately, so we don't include it here
+    local roles=("registrant" "administrative" "technical" "billing")
+    local role_names=("Registrant" "Admin" "Tech" "Billing")
+    
+    local found_any=0
+    
+    for i in "${!roles[@]}"; do
+        local role="${roles[$i]}"
+        local role_name="${role_names[$i]}"
+        
+        # Check if entity with this role exists and has data
+        local has_entity=$(echo "$json" | jq -r --arg role "$role" '
+            [.entities[]? | select(.roles[]? == $role)] | length
+        ' 2>/dev/null)
+        
+        [ "$has_entity" = "0" ] || [ -z "$has_entity" ] && continue
+        
+        # Extract entity info (take first matching entity)
+        local ent_name=$(echo "$json" | jq -r --arg role "$role" '
+            [.entities[]? | select(.roles[]? == $role) | .vcardArray[1][]? | select(.[0] == "fn") | .[3]] | .[0] // empty
+        ' 2>/dev/null)
+        
+        local ent_org=$(echo "$json" | jq -r --arg role "$role" '
+            [.entities[]? | select(.roles[]? == $role) | .vcardArray[1][]? | select(.[0] == "org") | .[3]] | .[0] // empty
+        ' 2>/dev/null)
+        
+        local ent_email=$(echo "$json" | jq -r --arg role "$role" '
+            [.entities[]? | select(.roles[]? == $role) | .vcardArray[1][]? | select(.[0] == "email") | .[3]] | .[0] // empty
+        ' 2>/dev/null)
+        
+        local ent_tel=$(echo "$json" | jq -r --arg role "$role" '
+            [.entities[]? | select(.roles[]? == $role) | .vcardArray[1][]? | select(.[0] == "tel") | .[3]] | .[0] // empty
+        ' 2>/dev/null)
+        
+        local ent_street=$(echo "$json" | jq -r --arg role "$role" '
+            [.entities[]? | select(.roles[]? == $role) | .vcardArray[1][]? | select(.[0] == "adr") | .[3][2]] | .[0] // empty
+        ' 2>/dev/null)
+        
+        local ent_city=$(echo "$json" | jq -r --arg role "$role" '
+            [.entities[]? | select(.roles[]? == $role) | .vcardArray[1][]? | select(.[0] == "adr") | .[3][3]] | .[0] // empty
+        ' 2>/dev/null)
+        
+        local ent_region=$(echo "$json" | jq -r --arg role "$role" '
+            [.entities[]? | select(.roles[]? == $role) | .vcardArray[1][]? | select(.[0] == "adr") | .[3][4]] | .[0] // empty
+        ' 2>/dev/null)
+        
+        local ent_postal=$(echo "$json" | jq -r --arg role "$role" '
+            [.entities[]? | select(.roles[]? == $role) | .vcardArray[1][]? | select(.[0] == "adr") | .[3][5]] | .[0] // empty
+        ' 2>/dev/null)
+        
+        local ent_country=$(echo "$json" | jq -r --arg role "$role" '
+            [.entities[]? | select(.roles[]? == $role) | .vcardArray[1][]? | select(.[0] == "adr") | .[3][6]] | .[0] // empty
+        ' 2>/dev/null)
+        
+        # Check if we have any actual data to display
+        local has_data=0
+        [ -n "$ent_name" ] && has_data=1
+        [ -n "$ent_org" ] && has_data=1
+        [ -n "$ent_email" ] && has_data=1
+        [ -n "$ent_tel" ] && has_data=1
+        [ -n "$ent_street" ] && has_data=1
+        
+        [ "$has_data" = "0" ] && continue
+        
+        found_any=1
+        printf "%b%s:%b\n" "$GREEN" "$role_name" "$NC"
+        
+        [ -n "$ent_name" ] && printf "  Name: %s\n" "$ent_name"
+        [ -n "$ent_org" ] && printf "  Organization: %s\n" "$ent_org"
+        [ -n "$ent_email" ] && printf "  Email: %s\n" "$ent_email"
+        [ -n "$ent_tel" ] && printf "  Phone: %s\n" "$ent_tel"
+        
+        # Address on one line if present
+        local addr_parts=()
+        [ -n "$ent_street" ] && addr_parts+=("$ent_street")
+        [ -n "$ent_city" ] && addr_parts+=("$ent_city")
+        [ -n "$ent_region" ] && addr_parts+=("$ent_region")
+        [ -n "$ent_postal" ] && addr_parts+=("$ent_postal")
+        [ -n "$ent_country" ] && addr_parts+=("$ent_country")
+        
+        if [ ${#addr_parts[@]} -gt 0 ]; then
+            local addr=$(IFS=', '; echo "${addr_parts[*]}")
+            printf "  Address: %s\n" "$addr"
+        fi
+    done
+    
+    # If no contact entities found and -R wasn't used, suggest using -R
+    if [ "$found_any" = "0" ] && [ "$FOLLOW_REGISTRAR" != "1" ]; then
+        # Check if there's a registrar link that could have more data
+        local has_registrar_link=0
+        local all_links=$(echo "$json" | jq -r '.links[]?.href // empty' 2>/dev/null)
+        while IFS= read -r link; do
+            [ -z "$link" ] && continue
+            if echo "$link" | grep -qi "rdap" && echo "$link" | grep -qi "/domain/"; then
+                if ! echo "$link" | grep -qiE "verisign|centralnic|nic\.|\.nic|registry"; then
+                    has_registrar_link=1
+                    break
+                fi
+            fi
+        done <<< "$all_links"
+        
+        if [ "$has_registrar_link" = "1" ]; then
+            printf "%bTip:%b Use -R flag for complete contact data from registrar\n" "$YELLOW" "$NC"
+        fi
+    fi
+}
+
+# Helper: Format entities in full mode (matching Go client output)
+format_entities_full() {
+    local json="$1"
+    
+    # Get number of entities
+    local entity_count=$(echo "$json" | jq -r '[.entities[]?] | length' 2>/dev/null)
+    [ -z "$entity_count" ] || [ "$entity_count" = "0" ] && return
+    
+    # Process each entity by index
+    for ((idx=0; idx<entity_count; idx++)); do
+        local entity=$(echo "$json" | jq -r ".entities[$idx]" 2>/dev/null)
+        [ -z "$entity" ] || [ "$entity" = "null" ] && continue
+        
+        printf "  Entity:\n"
+        printf "    Handle: %s\n" "$(echo "$entity" | jq -r '.handle // "N/A"')"
+        printf "    Role: %s\n" "$(echo "$entity" | jq -r '.roles | join(", ") // "N/A"')"
+        
+        # Public IDs
+        echo "$entity" | jq -r '.publicIds[]? | "    Public ID:\n      Type: \(.type // "N/A")\n      Identifier: \(.identifier // "N/A")"' 2>/dev/null
+        
+        # Links
+        echo "$entity" | jq -r '.links[]?.href // empty' 2>/dev/null | while read link; do
+            [ -n "$link" ] && printf "    Link: %s\n" "$link"
+        done
+        
+        printf "    vCard Version: 4.0\n"
+        
+        # vCard fields - extract each type separately to avoid duplication
+        local vcard_name=$(echo "$entity" | jq -r '[.vcardArray[1][]? | select(.[0] == "fn") | .[3]] | .[0] // empty' 2>/dev/null)
+        local vcard_org=$(echo "$entity" | jq -r '[.vcardArray[1][]? | select(.[0] == "org") | .[3]] | .[0] // empty' 2>/dev/null)
+        local vcard_email=$(echo "$entity" | jq -r '[.vcardArray[1][]? | select(.[0] == "email") | .[3]] | .[0] // empty' 2>/dev/null)
+        local vcard_tel=$(echo "$entity" | jq -r '[.vcardArray[1][]? | select(.[0] == "tel") | .[3]] | .[0] // empty' 2>/dev/null)
+        local vcard_street=$(echo "$entity" | jq -r '[.vcardArray[1][]? | select(.[0] == "adr") | .[3][2]] | .[0] // empty' 2>/dev/null)
+        local vcard_locality=$(echo "$entity" | jq -r '[.vcardArray[1][]? | select(.[0] == "adr") | .[3][3]] | .[0] // empty' 2>/dev/null)
+        local vcard_region=$(echo "$entity" | jq -r '[.vcardArray[1][]? | select(.[0] == "adr") | .[3][4]] | .[0] // empty' 2>/dev/null)
+        local vcard_postal=$(echo "$entity" | jq -r '[.vcardArray[1][]? | select(.[0] == "adr") | .[3][5]] | .[0] // empty' 2>/dev/null)
+        local vcard_country=$(echo "$entity" | jq -r '[.vcardArray[1][]? | select(.[0] == "adr") | .[3][6]] | .[0] // empty' 2>/dev/null)
+        
+        [ -n "$vcard_name" ] && printf "    vCard Name: %s\n" "$vcard_name"
+        [ -n "$vcard_org" ] && printf "    vCard Org: %s\n" "$vcard_org"
+        [ -n "$vcard_email" ] && printf "    vCard Email: %s\n" "$vcard_email"
+        [ -n "$vcard_tel" ] && printf "    vCard Tel: %s\n" "$vcard_tel"
+        [ -n "$vcard_street" ] && printf "    vCard Street: %s\n" "$vcard_street"
+        [ -n "$vcard_locality" ] && printf "    vCard Locality: %s\n" "$vcard_locality"
+        [ -n "$vcard_region" ] && printf "    vCard Region: %s\n" "$vcard_region"
+        [ -n "$vcard_postal" ] && printf "    vCard PostalCode: %s\n" "$vcard_postal"
+        [ -n "$vcard_country" ] && printf "    vCard CountryCode: %s\n" "$vcard_country"
+        
+        # Nested entities (like abuse contacts)
+        local nested_count=$(echo "$entity" | jq -r '[.entities[]?] | length' 2>/dev/null)
+        if [ -n "$nested_count" ] && [ "$nested_count" -gt 0 ] 2>/dev/null; then
+            for ((nidx=0; nidx<nested_count; nidx++)); do
+                local nested=$(echo "$entity" | jq -r ".entities[$nidx]" 2>/dev/null)
+                [ -z "$nested" ] || [ "$nested" = "null" ] && continue
+                
+                printf "    Entity:\n"
+                printf "      Role: %s\n" "$(echo "$nested" | jq -r '.roles | join(", ") // "N/A"')"
+                
+                local nested_name=$(echo "$nested" | jq -r '[.vcardArray[1][]? | select(.[0] == "fn") | .[3]] | .[0] // empty' 2>/dev/null)
+                local nested_tel=$(echo "$nested" | jq -r '[.vcardArray[1][]? | select(.[0] == "tel") | .[3]] | .[0] // empty' 2>/dev/null)
+                local nested_email=$(echo "$nested" | jq -r '[.vcardArray[1][]? | select(.[0] == "email") | .[3]] | .[0] // empty' 2>/dev/null)
+                
+                [ -n "$nested_name" ] && printf "      vCard Name: %s\n" "$nested_name"
+                [ -n "$nested_tel" ] && printf "      vCard Tel: %s\n" "$nested_tel"
+                [ -n "$nested_email" ] && printf "      vCard Email: %s\n" "$nested_email"
+            done
+        fi
+    done
+}
+
+# Format domain output
+format_domain() {
+    local json="$1"
+    
+    if [ -z "$json" ]; then
+        error "Empty response from server"
+    fi
+    
+    if [ "$RAW_OUTPUT" = "1" ]; then
+        if [ "$HAS_JQ" = "1" ]; then
+            echo "$json" | jq '.'
+        else
+            echo "$json"
+        fi
+        return
+    fi
+    
+    if [ "$HAS_JQ" = "1" ]; then
+        if [ "$FULL_OUTPUT" = "1" ]; then
+            format_domain_full "$json"
+        else
+            format_domain_brief "$json"
+        fi
+    else
+        printf "\n"
+        printf "%bDomain Information%b (install jq for better formatting)\n" "$BOLD" "$NC"
+        printf "────────────────────────────────────────\n"
+        echo "$json" | grep -oE '"ldhName"\s*:\s*"[^"]*"' | head -1 | sed 's/"ldhName"[[:space:]]*:[[:space:]]*"/Domain: /; s/"$//'
+        echo "$json" | grep -oE '"status"\s*:\s*\[[^]]*\]' | head -1 | sed 's/"status"[[:space:]]*:[[:space:]]*\[/Status: /; s/\]$//; s/"//g'
+        printf "\n"
+    fi
+}
+
+# Brief domain output
+format_domain_brief() {
+    local json="$1"
+    
+    printf "\n"
+    printf "%bDomain Information%b\n" "$BOLD" "$NC"
+    printf "────────────────────────────────────────\n"
+    
+    local name=$(echo "$json" | jq -r '.ldhName // .handle // "N/A"')
+    local status=$(echo "$json" | jq -r 'if .status then .status | join(", ") else "N/A" end')
+    local created=$(echo "$json" | jq -r '[.events[]? | select(.eventAction == "registration")] | .[0].eventDate // empty')
+    local expires=$(echo "$json" | jq -r '[.events[]? | select(.eventAction == "expiration" or .eventAction == "registrar expiration")] | .[0].eventDate // empty')
+    local updated=$(echo "$json" | jq -r '[.events[]? | select(.eventAction == "last changed")] | .[0].eventDate // empty')
+    
+    printf "%bDomain:%b      %s\n" "$GREEN" "$NC" "$name"
+    printf "%bStatus:%b      %s\n" "$GREEN" "$NC" "$status"
+    [ -n "$created" ] && printf "%bCreated:%b     %s\n" "$GREEN" "$NC" "$created"
+    [ -n "$expires" ] && printf "%bExpires:%b     %s\n" "$GREEN" "$NC" "$expires"
+    [ -n "$updated" ] && printf "%bUpdated:%b     %s\n" "$GREEN" "$NC" "$updated"
+    
+    # Nameservers - each on separate line
+    local ns_count=$(echo "$json" | jq -r '[.nameservers[]?.ldhName] | length' 2>/dev/null)
+    if [ "$ns_count" -gt 0 ] 2>/dev/null; then
+        printf "%bNameservers:%b\n" "$GREEN" "$NC"
+        echo "$json" | jq -r '.nameservers[]?.ldhName // empty' 2>/dev/null | while read ns; do
+            [ -n "$ns" ] && printf "  %s\n" "$ns"
+        done
+    fi
+    
+    # Registrar
+    local registrar=$(echo "$json" | jq -r '
+        [.entities[]? | select(.roles[]? == "registrar") | 
+         .vcardArray[1][]? | select(.[0] == "fn") | .[3]] | .[0] // empty
+    ' 2>/dev/null)
+    [ -n "$registrar" ] && printf "%bRegistrar:%b   %s\n" "$GREEN" "$NC" "$registrar"
+    
+    # DNSSEC
+    local dnssec=$(echo "$json" | jq -r 'if .secureDNS.delegationSigned == true then "Yes" elif .secureDNS.delegationSigned == false then "No" else "N/A" end' 2>/dev/null)
+    printf "%bDNSSEC:%b      %s\n" "$GREEN" "$NC" "$dnssec"
+    
+    # Entities (registrant, admin, tech, billing) - show if not empty
+    format_entities_brief "$json"
+    
+    printf "\n"
+}
+
+# Full domain output (all details)
+format_domain_full() {
+    local json="$1"
+    
+    printf "\n"
+    printf "%bDomain:%b\n" "$BOLD" "$NC"
+    
+    # Basic info
+    local name=$(echo "$json" | jq -r '.ldhName // "N/A"')
+    local unicode=$(echo "$json" | jq -r '.unicodeName // empty')
+    printf "  Domain Name: %s\n" "$name"
+    [ -n "$unicode" ] && [ "$unicode" != "$name" ] && printf "  Domain Name (Unicode): %s\n" "$unicode"
+    
+    # Handle
+    local handle=$(echo "$json" | jq -r '.handle // empty')
+    [ -n "$handle" ] && printf "  Handle: %s\n" "$handle"
+    
+    # Status
+    echo "$json" | jq -r '.status[]? // empty' 2>/dev/null | while read status; do
+        [ -n "$status" ] && printf "  Status: %s\n" "$status"
+    done
+    
+    # Port43
+    local port43=$(echo "$json" | jq -r '.port43 // empty')
+    [ -n "$port43" ] && printf "  Port43: %s\n" "$port43"
+    
+    # Conformance
+    echo "$json" | jq -r '.rdapConformance[]? // empty' 2>/dev/null | while read conf; do
+        [ -n "$conf" ] && printf "  Conformance: %s\n" "$conf"
+    done
+    
+    # Notices
+    local notice_count=$(echo "$json" | jq -r '[.notices[]?] | length' 2>/dev/null)
+    if [ "$notice_count" -gt 0 ] 2>/dev/null; then
+        echo "$json" | jq -r '
+            .notices[]? | 
+            "  Notice:\n    Title: \(.title // "N/A")\n" + 
+            (if .description then (.description | if type == "array" then .[] else . end | "    Description: \(.)") else "" end) +
+            (if .links then (.links[]?.href // empty | "\n    Link: \(.)") else "" end)
+        ' 2>/dev/null
+    fi
+    
+    # Links
+    echo "$json" | jq -r '.links[]?.href // empty' 2>/dev/null | while read link; do
+        [ -n "$link" ] && printf "  Link: %s\n" "$link"
+    done
+    
+    # Events
+    echo "$json" | jq -r '
+        .events[]? | "  Event:\n    Action: \(.eventAction // "N/A")\n    Date: \(.eventDate // "N/A")"
+    ' 2>/dev/null
+    
+    # Secure DNS
+    local zone_signed=$(echo "$json" | jq -r '.secureDNS.zoneSigned // "N/A"')
+    local delegation_signed=$(echo "$json" | jq -r '.secureDNS.delegationSigned // "N/A"')
+    printf "  Secure DNS:\n"
+    printf "    Zone Signed: %s\n" "$zone_signed"
+    printf "    Delegation Signed: %s\n" "$delegation_signed"
+    
+    # DS Data (if DNSSEC enabled)
+    local ds_data=$(echo "$json" | jq -r '.secureDNS.dsData[]? | "    DS: \(.keyTag) \(.algorithm) \(.digestType) \(.digest)"' 2>/dev/null)
+    [ -n "$ds_data" ] && echo "$ds_data"
+    
+    # Entities - use helper function
+    format_entities_full "$json"
+    
+    # Nameservers
+    echo "$json" | jq -r '
+        .nameservers[]? | 
+        "  Nameserver:\n    Nameserver: \(.ldhName // "N/A")" +
+        (if .unicodeName and .unicodeName != .ldhName then "\n    Nameserver (Unicode): \(.unicodeName)" else "" end) +
+        (if .ipAddresses then 
+            (if .ipAddresses.v4 then (.ipAddresses.v4[]? | "\n    IPv4: \(.)") else "" end) +
+            (if .ipAddresses.v6 then (.ipAddresses.v6[]? | "\n    IPv6: \(.)") else "" end)
+        else "" end)
+    ' 2>/dev/null
+    
+    # Redacted fields (if present)
+    local redacted=$(echo "$json" | jq -r '.redacted[]? | "  redacted:\n    name:\n      type: \(.name.type // .name.description // "N/A")\n    method: \(.method // "N/A")"' 2>/dev/null)
+    [ -n "$redacted" ] && echo "$redacted"
+    
+    printf "\n"
+}
+
+# Format IP output
+format_ip() {
+    local json="$1"
+    
+    if [ -z "$json" ]; then
+        error "Empty response from server"
+    fi
+    
+    if [ "$RAW_OUTPUT" = "1" ]; then
+        if [ "$HAS_JQ" = "1" ]; then
+            echo "$json" | jq '.'
+        else
+            echo "$json"
+        fi
+        return
+    fi
+    
+    if [ "$HAS_JQ" = "1" ]; then
+        if [ "$FULL_OUTPUT" = "1" ]; then
+            format_ip_full "$json"
+        else
+            format_ip_brief "$json"
+        fi
+    else
+        printf "\n"
+        echo "$json"
+        printf "\n"
+    fi
+}
+
+# Brief IP output
+format_ip_brief() {
+    local json="$1"
+    
+    printf "\n"
+    printf "%bIP Network Information%b\n" "$BOLD" "$NC"
+    printf "────────────────────────────────────────\n"
+    
+    printf "%bHandle:%b      %s\n" "$GREEN" "$NC" "$(echo "$json" | jq -r '.handle // "N/A"')"
+    printf "%bRange:%b       %s - %s\n" "$GREEN" "$NC" "$(echo "$json" | jq -r '.startAddress // "N/A"')" "$(echo "$json" | jq -r '.endAddress // "N/A"')"
+    printf "%bCIDR:%b        %s\n" "$GREEN" "$NC" "$(echo "$json" | jq -r 'if .cidr0_cidrs then [.cidr0_cidrs[] | "\(.v4prefix // .v6prefix)/\(.length)"] | join(", ") else "N/A" end')"
+    printf "%bName:%b        %s\n" "$GREEN" "$NC" "$(echo "$json" | jq -r '.name // "N/A"')"
+    printf "%bType:%b        %s\n" "$GREEN" "$NC" "$(echo "$json" | jq -r '.type // "N/A"')"
+    printf "%bCountry:%b     %s\n" "$GREEN" "$NC" "$(echo "$json" | jq -r '.country // "N/A"')"
+    printf "%bParent:%b      %s\n" "$GREEN" "$NC" "$(echo "$json" | jq -r '.parentHandle // "N/A"')"
+    
+    local org=$(echo "$json" | jq -r '
+        [.entities[]? | select(.roles[]? == "registrant" or .roles[]? == "holder") | 
+         .vcardArray[1][]? | select(.[0] == "fn") | .[3]] | .[0] // empty
+    ' 2>/dev/null)
+    [ -n "$org" ] && printf "%bOrganization:%b %s\n" "$GREEN" "$NC" "$org"
+    
+    printf "\n"
+}
+
+# Full IP output
+format_ip_full() {
+    local json="$1"
+    
+    printf "\n"
+    printf "%bIP Network:%b\n" "$BOLD" "$NC"
+    
+    printf "  Handle: %s\n" "$(echo "$json" | jq -r '.handle // "N/A"')"
+    printf "  Start Address: %s\n" "$(echo "$json" | jq -r '.startAddress // "N/A"')"
+    printf "  End Address: %s\n" "$(echo "$json" | jq -r '.endAddress // "N/A"')"
+    printf "  IP Version: %s\n" "$(echo "$json" | jq -r '.ipVersion // "N/A"')"
+    printf "  Name: %s\n" "$(echo "$json" | jq -r '.name // "N/A"')"
+    printf "  Type: %s\n" "$(echo "$json" | jq -r '.type // "N/A"')"
+    printf "  Country: %s\n" "$(echo "$json" | jq -r '.country // "N/A"')"
+    printf "  Parent Handle: %s\n" "$(echo "$json" | jq -r '.parentHandle // "N/A"')"
+    
+    # CIDR
+    echo "$json" | jq -r '.cidr0_cidrs[]? | "  CIDR: \(.v4prefix // .v6prefix)/\(.length)"' 2>/dev/null
+    
+    # Status
+    echo "$json" | jq -r '.status[]? // empty' 2>/dev/null | while read status; do
+        [ -n "$status" ] && printf "  Status: %s\n" "$status"
+    done
+    
+    # Events
+    echo "$json" | jq -r '
+        .events[]? | "  Event:\n    Action: \(.eventAction // "N/A")\n    Date: \(.eventDate // "N/A")"
+    ' 2>/dev/null
+    
+    # Entities
+    echo "$json" | jq -r '
+        .entities[]? | 
+        "  Entity:\n    Handle: \(.handle // "N/A")\n    Role: \(.roles | join(", ") // "N/A")" +
+        (if .vcardArray[1] then 
+            (.vcardArray[1][] | 
+                if .[0] == "fn" then "\n    vCard Name: \(.[3])" 
+                elif .[0] == "org" then "\n    vCard Org: \(.[3])"
+                elif .[0] == "adr" then 
+                    (if .[3][2] then "\n    vCard Street: \(.[3][2])" else "" end) +
+                    (if .[3][3] then "\n    vCard Locality: \(.[3][3])" else "" end) +
+                    (if .[3][4] then "\n    vCard Region: \(.[3][4])" else "" end) +
+                    (if .[3][5] then "\n    vCard PostalCode: \(.[3][5])" else "" end) +
+                    (if .[3][6] then "\n    vCard CountryCode: \(.[3][6])" else "" end)
+                elif .[0] == "tel" then "\n    vCard Tel: \(.[3])"
+                elif .[0] == "email" then "\n    vCard Email: \(.[3])"
+                else "" end
+            )
+        else "" end)
+    ' 2>/dev/null
+    
+    # Remarks
+    echo "$json" | jq -r '.remarks[]? | "  Remark:\n    Title: \(.title // "N/A")\n    Description: \(.description[]? // "N/A")"' 2>/dev/null
+    
+    # Links
+    echo "$json" | jq -r '.links[]? | "  Link: \(.href // "N/A") (\(.rel // "link"))"' 2>/dev/null
+    
+    printf "\n"
+}
+
+# Format ASN output
+format_asn() {
+    local json="$1"
+    
+    if [ -z "$json" ]; then
+        error "Empty response from server"
+    fi
+    
+    if [ "$RAW_OUTPUT" = "1" ]; then
+        if [ "$HAS_JQ" = "1" ]; then
+            echo "$json" | jq '.'
+        else
+            echo "$json"
+        fi
+        return
+    fi
+    
+    if [ "$HAS_JQ" = "1" ]; then
+        if [ "$FULL_OUTPUT" = "1" ]; then
+            format_asn_full "$json"
+        else
+            format_asn_brief "$json"
+        fi
+    else
+        printf "\n"
+        echo "$json"
+        printf "\n"
+    fi
+}
+
+# Brief ASN output
+format_asn_brief() {
+    local json="$1"
+    
+    printf "\n"
+    printf "%bASN Information%b\n" "$BOLD" "$NC"
+    printf "────────────────────────────────────────\n"
+    
+    printf "%bHandle:%b      %s\n" "$GREEN" "$NC" "$(echo "$json" | jq -r '.handle // "N/A"')"
+    printf "%bASN:%b         %s\n" "$GREEN" "$NC" "$(echo "$json" | jq -r '.startAutnum // "N/A"')"
+    printf "%bName:%b        %s\n" "$GREEN" "$NC" "$(echo "$json" | jq -r '.name // "N/A"')"
+    printf "%bType:%b        %s\n" "$GREEN" "$NC" "$(echo "$json" | jq -r '.type // "N/A"')"
+    printf "%bStatus:%b      %s\n" "$GREEN" "$NC" "$(echo "$json" | jq -r 'if .status then .status | join(", ") else "N/A" end')"
+    
+    local org=$(echo "$json" | jq -r '
+        [.entities[]? | select(.roles[]? == "registrant") | 
+         .vcardArray[1][]? | select(.[0] == "fn") | .[3]] | .[0] // empty
+    ' 2>/dev/null)
+    [ -n "$org" ] && printf "%bOrganization:%b %s\n" "$GREEN" "$NC" "$org"
+    
+    printf "\n"
+}
+
+# Full ASN output
+format_asn_full() {
+    local json="$1"
+    
+    printf "\n"
+    printf "%bAutonomous System:%b\n" "$BOLD" "$NC"
+    
+    printf "  Handle: %s\n" "$(echo "$json" | jq -r '.handle // "N/A"')"
+    printf "  Start Autnum: %s\n" "$(echo "$json" | jq -r '.startAutnum // "N/A"')"
+    printf "  End Autnum: %s\n" "$(echo "$json" | jq -r '.endAutnum // "N/A"')"
+    printf "  Name: %s\n" "$(echo "$json" | jq -r '.name // "N/A"')"
+    printf "  Type: %s\n" "$(echo "$json" | jq -r '.type // "N/A"')"
+    printf "  Country: %s\n" "$(echo "$json" | jq -r '.country // "N/A"')"
+    
+    # Status
+    echo "$json" | jq -r '.status[]? // empty' 2>/dev/null | while read status; do
+        [ -n "$status" ] && printf "  Status: %s\n" "$status"
+    done
+    
+    # Events
+    echo "$json" | jq -r '
+        .events[]? | "  Event:\n    Action: \(.eventAction // "N/A")\n    Date: \(.eventDate // "N/A")"
+    ' 2>/dev/null
+    
+    # Entities
+    echo "$json" | jq -r '
+        .entities[]? | 
+        "  Entity:\n    Handle: \(.handle // "N/A")\n    Role: \(.roles | join(", ") // "N/A")" +
+        (if .vcardArray[1] then 
+            (.vcardArray[1][] | 
+                if .[0] == "fn" then "\n    vCard Name: \(.[3])" 
+                elif .[0] == "org" then "\n    vCard Org: \(.[3])"
+                elif .[0] == "adr" then 
+                    (if .[3][2] then "\n    vCard Street: \(.[3][2])" else "" end) +
+                    (if .[3][3] then "\n    vCard Locality: \(.[3][3])" else "" end) +
+                    (if .[3][4] then "\n    vCard Region: \(.[3][4])" else "" end) +
+                    (if .[3][5] then "\n    vCard PostalCode: \(.[3][5])" else "" end) +
+                    (if .[3][6] then "\n    vCard CountryCode: \(.[3][6])" else "" end)
+                elif .[0] == "tel" then "\n    vCard Tel: \(.[3])"
+                elif .[0] == "email" then "\n    vCard Email: \(.[3])"
+                else "" end
+            )
+        else "" end)
+    ' 2>/dev/null
+    
+    # Remarks
+    echo "$json" | jq -r '.remarks[]? | "  Remark:\n    Title: \(.title // "N/A")\n    Description: \(.description[]? // "N/A")"' 2>/dev/null
+    
+    # Links
+    echo "$json" | jq -r '.links[]? | "  Link: \(.href // "N/A") (\(.rel // "link"))"' 2>/dev/null
+    
+    printf "\n"
+}
+
+# Format nameserver output
+format_nameserver() {
+    local json="$1"
+    
+    if [ -z "$json" ]; then
+        error "Empty response from server"
+    fi
+    
+    if [ "$RAW_OUTPUT" = "1" ]; then
+        if [ "$HAS_JQ" = "1" ]; then
+            echo "$json" | jq '.'
+        else
+            echo "$json"
+        fi
+        return
+    fi
+    
+    if [ "$HAS_JQ" = "1" ]; then
+        printf "\n"
+        printf "%bNameserver Information%b\n" "$BOLD" "$NC"
+        printf "────────────────────────────────────────\n"
+        
+        printf "%bNameserver:%b  %s\n" "$GREEN" "$NC" "$(echo "$json" | jq -r '.ldhName // "N/A"')"
+        
+        local unicode=$(echo "$json" | jq -r '.unicodeName // empty')
+        [ -n "$unicode" ] && printf "%bUnicode:%b     %s\n" "$GREEN" "$NC" "$unicode"
+        
+        local handle=$(echo "$json" | jq -r '.handle // empty')
+        [ -n "$handle" ] && printf "%bHandle:%b      %s\n" "$GREEN" "$NC" "$handle"
+        
+        local status=$(echo "$json" | jq -r 'if .status and (.status | length) > 0 then .status | join(", ") else empty end')
+        [ -n "$status" ] && printf "%bStatus:%b      %s\n" "$GREEN" "$NC" "$status"
+        
+        # IP Addresses - each on separate line
+        local has_ipv4=$(echo "$json" | jq -r '.ipAddresses.v4 // [] | length')
+        local has_ipv6=$(echo "$json" | jq -r '.ipAddresses.v6 // [] | length')
+        
+        if [ "$has_ipv4" -gt 0 ] 2>/dev/null; then
+            printf "%bIPv4:%b\n" "$GREEN" "$NC"
+            echo "$json" | jq -r '.ipAddresses.v4[]?' 2>/dev/null | while read ip; do
+                [ -n "$ip" ] && printf "  %s\n" "$ip"
+            done
+        fi
+        
+        if [ "$has_ipv6" -gt 0 ] 2>/dev/null; then
+            printf "%bIPv6:%b\n" "$GREEN" "$NC"
+            echo "$json" | jq -r '.ipAddresses.v6[]?' 2>/dev/null | while read ip; do
+                [ -n "$ip" ] && printf "  %s\n" "$ip"
+            done
+        fi
+        
+        # Events
+        local created=$(echo "$json" | jq -r '[.events[]? | select(.eventAction == "registration")] | .[0].eventDate // empty')
+        local updated=$(echo "$json" | jq -r '[.events[]? | select(.eventAction == "last changed")] | .[0].eventDate // empty')
+        [ -n "$created" ] && printf "%bCreated:%b     %s\n" "$GREEN" "$NC" "$created"
+        [ -n "$updated" ] && printf "%bUpdated:%b     %s\n" "$GREEN" "$NC" "$updated"
+        
+        # Entities - show in brief mode too
+        local entity_count=$(echo "$json" | jq -r '[.entities[]?] | length' 2>/dev/null)
+        if [ "$entity_count" -gt 0 ] 2>/dev/null; then
+            format_entities_brief "$json"
+        fi
+        
+        printf "\n"
+    else
+        printf "\n"
+        echo "$json"
+        printf "\n"
+    fi
+}
+
+# Format help output
+format_help() {
+    local json="$1"
+    
+    if [ -z "$json" ]; then
+        error "Empty response from server"
+    fi
+    
+    if [ "$RAW_OUTPUT" = "1" ]; then
+        if [ "$HAS_JQ" = "1" ]; then
+            echo "$json" | jq '.'
+        else
+            echo "$json"
+        fi
+        return
+    fi
+    
+    if [ "$HAS_JQ" = "1" ]; then
+        printf "\n"
+        printf "%bRDAP Server Help%b\n" "$BOLD" "$NC"
+        printf "────────────────────────────────────────\n"
+        
+        # Conformance
+        printf "%bConformance:%b\n" "$GREEN" "$NC"
+        echo "$json" | jq -r '.rdapConformance[]? // empty' 2>/dev/null | while read conf; do
+            [ -n "$conf" ] && printf "  %s\n" "$conf"
+        done
+        
+        # Notices
+        local notice_count=$(echo "$json" | jq -r '[.notices[]?] | length' 2>/dev/null)
+        if [ "$notice_count" -gt 0 ] 2>/dev/null; then
+            printf "%bNotices:%b\n" "$GREEN" "$NC"
+            echo "$json" | jq -r '
+                .notices[]? | 
+                "  \(.title // "Notice"):\n" + 
+                (if .description then 
+                    if .description | type == "array" then 
+                        (.description[] | "    \(.)") 
+                    else 
+                        "    \(.description)" 
+                    end 
+                else "" end)
+            ' 2>/dev/null
+        fi
+        
+        # Links
+        printf "%bLinks:%b\n" "$GREEN" "$NC"
+        echo "$json" | jq -r '.links[]? | "  \(.rel // "link"): \(.href // "N/A")"' 2>/dev/null
+        
+        printf "\n"
+    else
+        printf "\n"
+        echo "$json"
+        printf "\n"
+    fi
+}
+
+# Format entity output
+format_entity() {
+    local json="$1"
+    
+    if [ -z "$json" ]; then
+        error "Empty response from server"
+    fi
+    
+    if [ "$RAW_OUTPUT" = "1" ]; then
+        if [ "$HAS_JQ" = "1" ]; then
+            echo "$json" | jq '.'
+        else
+            echo "$json"
+        fi
+        return
+    fi
+    
+    if [ "$HAS_JQ" = "1" ]; then
+        printf "\n"
+        printf "%bEntity Information%b\n" "$BOLD" "$NC"
+        printf "────────────────────────────────────────\n"
+        
+        printf "%bHandle:%b      %s\n" "$GREEN" "$NC" "$(echo "$json" | jq -r '.handle // "N/A"')"
+        printf "%bRoles:%b       %s\n" "$GREEN" "$NC" "$(echo "$json" | jq -r 'if .roles then .roles | join(", ") else "N/A" end')"
+        printf "%bStatus:%b      %s\n" "$GREEN" "$NC" "$(echo "$json" | jq -r 'if .status then .status | join(", ") else "N/A" end')"
+        
+        # vCard info
+        local name=$(echo "$json" | jq -r '[.vcardArray[1][]? | select(.[0] == "fn") | .[3]] | .[0] // empty')
+        local org=$(echo "$json" | jq -r '[.vcardArray[1][]? | select(.[0] == "org") | .[3]] | .[0] // empty')
+        local email=$(echo "$json" | jq -r '[.vcardArray[1][]? | select(.[0] == "email") | .[3]] | .[0] // empty')
+        local tel=$(echo "$json" | jq -r '[.vcardArray[1][]? | select(.[0] == "tel") | .[3]] | .[0] // empty')
+        
+        [ -n "$name" ] && printf "%bName:%b        %s\n" "$GREEN" "$NC" "$name"
+        [ -n "$org" ] && printf "%bOrganization:%b %s\n" "$GREEN" "$NC" "$org"
+        [ -n "$email" ] && printf "%bEmail:%b       %s\n" "$GREEN" "$NC" "$email"
+        [ -n "$tel" ] && printf "%bPhone:%b       %s\n" "$GREEN" "$NC" "$tel"
+        
+        # Address
+        local addr=$(echo "$json" | jq -r '
+            [.vcardArray[1][]? | select(.[0] == "adr") | .[3]] | .[0] |
+            if . then [.[2], .[3], .[4], .[5], .[6]] | map(select(. != null and . != "")) | join(", ") else null end
+        ' 2>/dev/null)
+        [ -n "$addr" ] && [ "$addr" != "null" ] && printf "%bAddress:%b     %s\n" "$GREEN" "$NC" "$addr"
+        
+        # Public IDs
+        echo "$json" | jq -r '.publicIds[]? | "Public ID: \(.type) = \(.identifier)"' 2>/dev/null | while read pid; do
+            [ -n "$pid" ] && printf "%b%s%b\n" "$GREEN" "$pid" "$NC"
+        done
+        
+        printf "\n"
+    else
+        printf "\n"
+        echo "$json"
+        printf "\n"
+    fi
+}
+
+# Format domain search results
+format_domain_search() {
+    local json="$1"
+    
+    if [ -z "$json" ]; then
+        error "Empty response from server"
+    fi
+    
+    if [ "$RAW_OUTPUT" = "1" ]; then
+        if [ "$HAS_JQ" = "1" ]; then
+            echo "$json" | jq '.'
+        else
+            echo "$json"
+        fi
+        return
+    fi
+    
+    if [ "$HAS_JQ" = "1" ]; then
+        printf "\n"
+        printf "%bDomain Search Results%b\n" "$BOLD" "$NC"
+        printf "────────────────────────────────────────\n"
+        
+        local count=$(echo "$json" | jq -r '.domainSearchResults | length' 2>/dev/null)
+        printf "%bResults:%b     %s\n\n" "$GREEN" "$NC" "${count:-0}"
+        
+        echo "$json" | jq -r '
+            .domainSearchResults[]? | 
+            "  Domain: \(.ldhName // "N/A")\n" +
+            "    Status: \(if .status then .status | join(", ") else "N/A" end)\n" +
+            "    Handle: \(.handle // "N/A")\n"
+        ' 2>/dev/null
+        
+        # Check for truncation notice
+        local truncated=$(echo "$json" | jq -r '.notices[]? | select(.title == "Search Policy" or .title | test("truncat"; "i")) | .title' 2>/dev/null | head -1)
+        [ -n "$truncated" ] && printf "%bNote:%b Results may be truncated by server policy\n" "$YELLOW" "$NC"
+        
+        printf "\n"
+    else
+        printf "\n"
+        echo "$json"
+        printf "\n"
+    fi
+}
+
+# Format nameserver search results
+format_ns_search() {
+    local json="$1"
+    
+    if [ -z "$json" ]; then
+        error "Empty response from server"
+    fi
+    
+    if [ "$RAW_OUTPUT" = "1" ]; then
+        if [ "$HAS_JQ" = "1" ]; then
+            echo "$json" | jq '.'
+        else
+            echo "$json"
+        fi
+        return
+    fi
+    
+    if [ "$HAS_JQ" = "1" ]; then
+        printf "\n"
+        printf "%bNameserver Search Results%b\n" "$BOLD" "$NC"
+        printf "────────────────────────────────────────\n"
+        
+        local count=$(echo "$json" | jq -r '.nameserverSearchResults | length' 2>/dev/null)
+        printf "%bResults:%b     %s\n\n" "$GREEN" "$NC" "${count:-0}"
+        
+        echo "$json" | jq -r '
+            .nameserverSearchResults[]? | 
+            "  Nameserver: \(.ldhName // "N/A")\n" +
+            "    Handle: \(.handle // "N/A")\n" +
+            (if .ipAddresses.v4 then "    IPv4: \(.ipAddresses.v4 | join(", "))\n" else "" end) +
+            (if .ipAddresses.v6 then "    IPv6: \(.ipAddresses.v6 | join(", "))\n" else "" end)
+        ' 2>/dev/null
+        
+        printf "\n"
+    else
+        printf "\n"
+        echo "$json"
+        printf "\n"
+    fi
+}
+
+# Format entity search results
+format_entity_search() {
+    local json="$1"
+    
+    if [ -z "$json" ]; then
+        error "Empty response from server"
+    fi
+    
+    if [ "$RAW_OUTPUT" = "1" ]; then
+        if [ "$HAS_JQ" = "1" ]; then
+            echo "$json" | jq '.'
+        else
+            echo "$json"
+        fi
+        return
+    fi
+    
+    if [ "$HAS_JQ" = "1" ]; then
+        printf "\n"
+        printf "%bEntity Search Results%b\n" "$BOLD" "$NC"
+        printf "────────────────────────────────────────\n"
+        
+        local count=$(echo "$json" | jq -r '.entitySearchResults | length' 2>/dev/null)
+        printf "%bResults:%b     %s\n\n" "$GREEN" "$NC" "${count:-0}"
+        
+        echo "$json" | jq -r '
+            .entitySearchResults[]? | 
+            "  Handle: \(.handle // "N/A")\n" +
+            "    Roles: \(if .roles then .roles | join(", ") else "N/A" end)\n" +
+            (if .vcardArray[1] then 
+                ([.vcardArray[1][]? | select(.[0] == "fn") | .[3]] | .[0] | if . then "    Name: \(.)\n" else "" end)
+            else "" end)
+        ' 2>/dev/null
+        
+        printf "\n"
+    else
+        printf "\n"
+        echo "$json"
+        printf "\n"
+    fi
+}
+
+# Main
+main() {
+    local QUERY=""
+    local SERVER=""
+    local QUERY_TYPE=""
+    RAW_OUTPUT=0
+    FULL_OUTPUT=0
+    FOLLOW_REGISTRAR=0
+    VERBOSE=0
+    
+    # Parse arguments
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            -h|--help)
+                usage
+                ;;
+            -t|--type)
+                QUERY_TYPE="$2"
+                shift 2
+                ;;
+            -f|--full)
+                FULL_OUTPUT=1
+                shift
+                ;;
+            -R|--registrar)
+                FOLLOW_REGISTRAR=1
+                shift
+                ;;
+            -r|--raw)
+                RAW_OUTPUT=1
+                shift
+                ;;
+            -v|--verbose)
+                VERBOSE=1
+                shift
+                ;;
+            -s|--server)
+                SERVER="$2"
+                shift 2
+                ;;
+            --clear-cache)
+                rm -rf "$CACHE_DIR"/*
+                echo "Cache cleared"
+                exit 0
+                ;;
+            -*)
+                error "Unknown option: $1"
+                ;;
+            *)
+                QUERY="$1"
+                shift
+                ;;
+        esac
+    done
+    
+    [ -z "$QUERY" ] && [ -z "$QUERY_TYPE" ] && usage
+    [ -z "$QUERY" ] && [ "$QUERY_TYPE" != "help" ] && usage
+    
+    # Debug: show what we parsed
+    info "Parsed arguments:"
+    info "  QUERY_TYPE: '$QUERY_TYPE'"
+    info "  SERVER: '$SERVER'"
+    info "  QUERY: '$QUERY'"
+    
+    # Normalize query
+    [ -n "$QUERY" ] && QUERY=$(echo "$QUERY" | tr '[:upper:]' '[:lower:]')
+    
+    # Use explicit type if provided, otherwise detect
+    local type
+    if [ -n "$QUERY_TYPE" ]; then
+        type=$(normalize_query_type "$QUERY_TYPE")
+        info "Query type (explicit): $type"
+        
+        # Validate server requirement for advanced types
+        case "$type" in
+            nameserver|help|entity|domain-search|domain-search-by-ns|domain-search-by-ns-ip|ns-search|ns-search-by-ip|entity-search|entity-search-by-handle)
+                [ -z "$SERVER" ] && error "Server URL required for '$type' queries. Use -s <server_url>"
+                ;;
+        esac
+    else
+        type=$(detect_type "$QUERY")
+        info "Query type (detected): $type"
+    fi
+    
+    # Find server if not specified (for basic types)
+    if [ -z "$SERVER" ]; then
+        info "No server specified, looking up server for $type..."
+        case "$type" in
+            domain)
+                SERVER=$(find_domain_server "$QUERY")
+                ;;
+            ip)
+                SERVER=$(find_ip_server "$QUERY")
+                ;;
+            asn)
+                SERVER=$(find_asn_server "$QUERY")
+                ;;
+        esac
+    else
+        info "Using user-specified server: $SERVER"
+    fi
+    
+    info "Using RDAP server: $SERVER"
+    
+    # Query and format
+    local result
+    result=$(query_rdap "$SERVER" "$type" "$QUERY")
+    
+    # For domain queries with -R flag, follow registrar link for complete data
+    if [ "$type" = "domain" ] && [ "$FOLLOW_REGISTRAR" = "1" ] && [ "$HAS_JQ" = "1" ]; then
+        # Look for registrar RDAP link in the response
+        # We want a link that has "rdap" and "domain" in the URL, but is NOT from the registry (verisign for .com)
+        info "Looking for registrar link..."
+        
+        # Get all links first
+        local all_links=$(echo "$result" | jq -r '.links[]?.href // empty' 2>/dev/null)
+        info "Found links: $all_links"
+        
+        # Find the registrar link (has rdap and domain, not verisign/registry)
+        local registrar_link=""
+        while IFS= read -r link; do
+            [ -z "$link" ] && continue
+            # Check if it looks like a registrar RDAP link
+            if echo "$link" | grep -qi "rdap" && echo "$link" | grep -qi "/domain/"; then
+                # Exclude registry links
+                if ! echo "$link" | grep -qiE "verisign|centralnic|nic\.|\.nic|registry"; then
+                    registrar_link="$link"
+                    break
+                fi
+            fi
+        done <<< "$all_links"
+        
+        if [ -n "$registrar_link" ]; then
+            info "Following registrar link: $registrar_link"
+            
+            local tmpfile=$(mktemp)
+            local http_code
+            
+            http_code=$(curl -sS -L --connect-timeout 10 --max-time 30 -w "%{http_code}" -o "$tmpfile" "$registrar_link" 2>&1)
+            local registrar_result=$(cat "$tmpfile")
+            rm -f "$tmpfile"
+            
+            if [ "$http_code" = "200" ] && [ -n "$registrar_result" ]; then
+                info "Got response from registrar RDAP (HTTP $http_code)"
+                result="$registrar_result"
+            else
+                warn "Could not fetch registrar RDAP (HTTP $http_code), using registry data"
+            fi
+        else
+            info "No registrar RDAP link found in response"
+        fi
+    fi
+    
+    case "$type" in
+        domain)
+            format_domain "$result"
+            ;;
+        ip)
+            format_ip "$result"
+            ;;
+        asn)
+            format_asn "$result"
+            ;;
+        nameserver)
+            format_nameserver "$result"
+            ;;
+        help)
+            format_help "$result"
+            ;;
+        entity)
+            format_entity "$result"
+            ;;
+        domain-search|domain-search-by-ns|domain-search-by-ns-ip)
+            format_domain_search "$result"
+            ;;
+        ns-search|ns-search-by-ip)
+            format_ns_search "$result"
+            ;;
+        entity-search|entity-search-by-handle)
+            format_entity_search "$result"
+            ;;
+    esac
+}
+
+main "$@"
