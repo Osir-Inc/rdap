@@ -180,40 +180,73 @@ rdap -t entity-search-by-handle -s https://rdap.arin.net/registry 'OSIR*'
 
 RIPE NCC provides RDAP access to European IP allocations, ASNs, and reverse DNS.
 
+**Shortcut syntax** (new in v1.3.8):
 ```bash
-# IP lookup (91.239.6.69 is in RIPE region)
-rdap 91.239.6.69
+# Entity lookup - simple and clean
+rdap ripe entity ORG-HS382-RIPE
 
-# Direct RIPE query with specific server
-rdap -s https://rdap.db.ripe.net 91.239.6.69
+# IP lookup
+rdap ripe ip 91.239.6.69
 
-# ASN lookup via RIPE
-rdap -s https://rdap.db.ripe.net/autnum/3333
+# ASN lookup
+rdap ripe asn AS213683
 
-# Entity lookup (organisation, person, maintainer)
+# Help/capabilities
+rdap ripe help
+
+# Searches
+rdap ripe domain-search '6.239.91.in-addr.arpa'
+rdap ripe entity-search 'Host.AL'
+```
+
+**Supported RIRs for shortcuts:** `ripe`, `arin`, `apnic`, `lacnic`, `afrinic`
+
+```bash
+# More shortcut examples
+rdap arin entity ARIN
+rdap apnic ip 1.1.1.1
+```
+
+**Traditional syntax** (still works):
+```bash
 rdap -t entity -s https://rdap.db.ripe.net ORG-HS382-RIPE
-rdap -t entity -s https://rdap.db.ripe.net RIPE-NCC-MNT
-
-# Reverse DNS domain search (RIPE only has reverse domains)
-rdap -t domain-search -s https://rdap.db.ripe.net '6.239.91.in-addr.arpa'
-
-# Entity search by name
-rdap -t entity-search -s https://rdap.db.ripe.net 'Host.AL'
-
-# Entity search by handle
-rdap -t entity-search-by-handle -s https://rdap.db.ripe.net 'ORG-HS*'
-
-# RIPE help/capabilities
-rdap -t help -s https://rdap.db.ripe.net
 ```
 
 **RIPE Object Types:**
 | Type | Description | Example |
 |------|-------------|---------|
-| ip | IPv4/IPv6 allocations | `rdap -s https://rdap.db.ripe.net 91.239.6.69` |
-| autnum | AS Numbers | `rdap -s https://rdap.db.ripe.net/autnum/3333` |
-| entity | Person, Role, Org, Maintainer | `rdap -t entity -s https://rdap.db.ripe.net ORG-HS382-RIPE` |
-| domain | Reverse DNS only | `rdap -t domain -s https://rdap.db.ripe.net 6.239.91.in-addr.arpa` |
+| ip | IPv4/IPv6 allocations | `rdap ripe ip 91.239.6.69` |
+| asn/autnum | AS Numbers | `rdap ripe asn AS213683` |
+| entity | Person, Role, Org, Maintainer | `rdap ripe entity ORG-HS382-RIPE` |
+| domain | Reverse DNS only | `rdap ripe domain 6.239.91.in-addr.arpa` |
+
+**Entity output** includes networks, ASNs, and related entities:
+```
+$ rdap ripe entity ORG-HS382-RIPE
+
+Entity Information
+────────────────────────────────────────
+Handle:      ORG-HS382-RIPE
+Name:        Host.AL Shpk
+Kind:        org
+Email:       root@host.al
+Address:     Asim Vokshi, Pallati 13 kate, shkalla 25...
+Created:     2024-11-05T10:11:07Z
+Updated:     2024-12-12T21:04:20Z
+
+AS Numbers:
+  AS213683 - host-al-asn
+
+IP Networks:
+  91.239.6.0/23 (ORG-HS382-RIPE, AL)
+  2001:67c:fd0::/48 (AL-ALBANIAN1-20241223, AL)
+  203.30.219.0/24 (ORG-HS382-RIPE, AL)
+
+Related Entities:
+  AB46576-RIPE - Armand Brahaj (administrative)
+  ARB-MNT - ARB-MNT (registrant)
+  HA5625-RIPE - HOSTAL ABS (abuse)
+```
 
 ---
 

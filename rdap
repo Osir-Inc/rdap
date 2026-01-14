@@ -105,12 +105,22 @@ usage() {
     printf "\n"
     printf "%bUSAGE:%b\n" "$BOLD" "$NC"
     printf "    rdap [OPTIONS] <query>\n"
+    printf "    rdap <rir> <type> <query>        # Shortcut for RIR queries\n"
     printf "\n"
     printf "%bBASIC QUERY TYPES (auto-detected):%b\n" "$BOLD" "$NC"
     printf "    domain      rdap osir.com\n"
     printf "    IPv4        rdap 91.239.6.69\n"
     printf "    IPv6        rdap 2001:4860:4860::8888\n"
     printf "    ASN         rdap AS11867 or rdap 11867\n"
+    printf "\n"
+    printf "%bRIR SHORTCUTS:%b\n" "$BOLD" "$NC"
+    printf "    rdap ripe entity ORG-HS382-RIPE\n"
+    printf "    rdap ripe ip 91.239.6.69\n"
+    printf "    rdap ripe asn AS213683\n"
+    printf "    rdap arin entity ARIN\n"
+    printf "    rdap apnic ip 1.1.1.1\n"
+    printf "\n"
+    printf "  %bSupported RIRs:%b ripe, arin, apnic, lacnic, afrinic\n" "$CYAN" "$NC"
     printf "\n"
     printf "%bADVANCED QUERY TYPES (use -t flag):%b\n" "$BOLD" "$NC"
     printf "    nameserver                      rdap -t ns -s <server> ns1.osir.com\n"
@@ -138,14 +148,14 @@ usage() {
     printf "    rdap -R osir.com                   # Follow registrar for full data\n"
     printf "    rdap AS11867                       # ASN lookup\n"
     printf "    rdap 91.239.6.69                   # IP lookup (auto-detects RIPE)\n"
-    printf "    rdap -s https://rdap.osir.com/rdap osir.com\n"
     printf "\n"
-    printf "  %bRIPE Database examples:%b\n" "$CYAN" "$NC"
-    printf "    rdap -s https://rdap.db.ripe.net ip/91.239.6.69\n"
-    printf "    rdap -t entity -s https://rdap.db.ripe.net ORG-HS382-RIPE\n"
-    printf "    rdap -t help -s https://rdap.db.ripe.net\n"
-    printf "    rdap -t domain-search -s https://rdap.db.ripe.net '6.239.91.in-addr.arpa'\n"
-    printf "    rdap -t entity-search -s https://rdap.db.ripe.net 'Host.AL'\n"
+    printf "  %bRIPE shortcuts:%b\n" "$CYAN" "$NC"
+    printf "    rdap ripe entity ORG-HS382-RIPE   # Organization lookup\n"
+    printf "    rdap ripe ip 91.239.6.69          # IP lookup\n"
+    printf "    rdap ripe asn AS213683            # ASN lookup\n"
+    printf "    rdap ripe help                    # Server capabilities\n"
+    printf "    rdap ripe domain-search '6.239.91.in-addr.arpa'\n"
+    printf "    rdap ripe entity-search 'Host.AL'\n"
     printf "\n"
     printf "%bRDAP SERVERS:%b\n" "$BOLD" "$NC"
     printf "    Verisign (.com/.net)    https://rdap.verisign.com/com/v1\n"
@@ -1166,31 +1176,81 @@ format_entity() {
         printf "────────────────────────────────────────\n"
         
         printf "%bHandle:%b      %s\n" "$GREEN" "$NC" "$(echo "$json" | jq -r '.handle // "N/A"')"
-        printf "%bRoles:%b       %s\n" "$GREEN" "$NC" "$(echo "$json" | jq -r 'if .roles then .roles | join(", ") else "N/A" end')"
-        printf "%bStatus:%b      %s\n" "$GREEN" "$NC" "$(echo "$json" | jq -r 'if .status then .status | join(", ") else "N/A" end')"
         
         # vCard info
         local name=$(echo "$json" | jq -r '[.vcardArray[1][]? | select(.[0] == "fn") | .[3]] | .[0] // empty')
+        local kind=$(echo "$json" | jq -r '[.vcardArray[1][]? | select(.[0] == "kind") | .[3]] | .[0] // empty')
         local org=$(echo "$json" | jq -r '[.vcardArray[1][]? | select(.[0] == "org") | .[3]] | .[0] // empty')
         local email=$(echo "$json" | jq -r '[.vcardArray[1][]? | select(.[0] == "email") | .[3]] | .[0] // empty')
         local tel=$(echo "$json" | jq -r '[.vcardArray[1][]? | select(.[0] == "tel") | .[3]] | .[0] // empty')
         
         [ -n "$name" ] && printf "%bName:%b        %s\n" "$GREEN" "$NC" "$name"
+        [ -n "$kind" ] && printf "%bKind:%b        %s\n" "$GREEN" "$NC" "$kind"
         [ -n "$org" ] && printf "%bOrganization:%b %s\n" "$GREEN" "$NC" "$org"
         [ -n "$email" ] && printf "%bEmail:%b       %s\n" "$GREEN" "$NC" "$email"
         [ -n "$tel" ] && printf "%bPhone:%b       %s\n" "$GREEN" "$NC" "$tel"
         
-        # Address
-        local addr=$(echo "$json" | jq -r '
-            [.vcardArray[1][]? | select(.[0] == "adr") | .[3]] | .[0] |
-            if . then [.[2], .[3], .[4], .[5], .[6]] | map(select(. != null and . != "")) | join(", ") else null end
-        ' 2>/dev/null)
-        [ -n "$addr" ] && [ "$addr" != "null" ] && printf "%bAddress:%b     %s\n" "$GREEN" "$NC" "$addr"
+        # Address - try label first (RIPE style), then structured
+        local addr_label=$(echo "$json" | jq -r '[.vcardArray[1][]? | select(.[0] == "adr") | .[1].label] | .[0] // empty' 2>/dev/null)
+        if [ -n "$addr_label" ] && [ "$addr_label" != "null" ]; then
+            printf "%bAddress:%b     %s\n" "$GREEN" "$NC" "$(echo "$addr_label" | tr '\n' ', ' | sed 's/, *$//')"
+        else
+            local addr=$(echo "$json" | jq -r '
+                [.vcardArray[1][]? | select(.[0] == "adr") | .[3]] | .[0] |
+                if . then [.[2], .[3], .[4], .[5], .[6]] | map(select(. != null and . != "")) | join(", ") else null end
+            ' 2>/dev/null)
+            [ -n "$addr" ] && [ "$addr" != "null" ] && [ "$addr" != "" ] && printf "%bAddress:%b     %s\n" "$GREEN" "$NC" "$addr"
+        fi
+        
+        # Events
+        local created=$(echo "$json" | jq -r '[.events[]? | select(.eventAction == "registration")] | .[0].eventDate // empty')
+        local updated=$(echo "$json" | jq -r '[.events[]? | select(.eventAction == "last changed")] | .[0].eventDate // empty')
+        [ -n "$created" ] && printf "%bCreated:%b     %s\n" "$GREEN" "$NC" "$created"
+        [ -n "$updated" ] && printf "%bUpdated:%b     %s\n" "$GREEN" "$NC" "$updated"
+        
+        # Remarks
+        local remarks=$(echo "$json" | jq -r '.remarks[]?.description[]? // empty' 2>/dev/null | grep -v '^\*' | head -3)
+        [ -n "$remarks" ] && printf "%bRemarks:%b     %s\n" "$GREEN" "$NC" "$remarks"
+        
+        # ASNs (RIPE returns these for orgs)
+        local asn_count=$(echo "$json" | jq -r '[.autnums[]?] | length' 2>/dev/null)
+        if [ "$asn_count" -gt 0 ] 2>/dev/null; then
+            printf "\n%bAS Numbers:%b\n" "$CYAN" "$NC"
+            echo "$json" | jq -r '.autnums[]? | "  \(.handle // "N/A") - \(.name // "N/A")"' 2>/dev/null
+        fi
+        
+        # Networks (RIPE returns these for orgs)
+        local net_count=$(echo "$json" | jq -r '[.networks[]?] | length' 2>/dev/null)
+        if [ "$net_count" -gt 0 ] 2>/dev/null; then
+            printf "\n%bIP Networks:%b\n" "$CYAN" "$NC"
+            echo "$json" | jq -r '.networks[]? | 
+                "  " + (if .cidr0_cidrs[0].v4prefix then 
+                    .cidr0_cidrs[0].v4prefix + "/" + (.cidr0_cidrs[0].length | tostring)
+                elif .cidr0_cidrs[0].v6prefix then
+                    .cidr0_cidrs[0].v6prefix + "/" + (.cidr0_cidrs[0].length | tostring)
+                else
+                    .handle
+                end) + " (" + (.name // "N/A") + ", " + (.country // "?") + ")"
+            ' 2>/dev/null
+        fi
+        
+        # Related entities
+        local entity_count=$(echo "$json" | jq -r '[.entities[]?] | length' 2>/dev/null)
+        if [ "$entity_count" -gt 0 ] 2>/dev/null; then
+            printf "\n%bRelated Entities:%b\n" "$CYAN" "$NC"
+            echo "$json" | jq -r '.entities[]? | 
+                "  \(.handle // "N/A") - " + 
+                ([.vcardArray[1][]? | select(.[0] == "fn") | .[3]] | .[0] // "N/A") +
+                " (" + (if .roles then .roles | join(", ") else "N/A" end) + ")"
+            ' 2>/dev/null
+        fi
         
         # Public IDs
-        echo "$json" | jq -r '.publicIds[]? | "Public ID: \(.type) = \(.identifier)"' 2>/dev/null | while read pid; do
-            [ -n "$pid" ] && printf "%b%s%b\n" "$GREEN" "$pid" "$NC"
-        done
+        local pid_count=$(echo "$json" | jq -r '[.publicIds[]?] | length' 2>/dev/null)
+        if [ "$pid_count" -gt 0 ] 2>/dev/null; then
+            printf "\n%bPublic IDs:%b\n" "$CYAN" "$NC"
+            echo "$json" | jq -r '.publicIds[]? | "  \(.type): \(.identifier)"' 2>/dev/null
+        fi
         
         printf "\n"
     else
@@ -1337,15 +1397,12 @@ main() {
     FOLLOW_REGISTRAR=0
     VERBOSE=0
     
-    # Parse arguments
+    # First pass: extract flags and collect remaining args
+    local -a remaining_args=()
     while [ $# -gt 0 ]; do
         case "$1" in
             -h|--help)
                 usage
-                ;;
-            -t|--type)
-                QUERY_TYPE="$2"
-                shift 2
                 ;;
             -f|--full)
                 FULL_OUTPUT=1
@@ -1363,6 +1420,10 @@ main() {
                 VERBOSE=1
                 shift
                 ;;
+            -t|--type)
+                QUERY_TYPE="$2"
+                shift 2
+                ;;
             -s|--server)
                 SERVER="$2"
                 shift 2
@@ -1376,11 +1437,82 @@ main() {
                 error "Unknown option: $1"
                 ;;
             *)
-                QUERY="$1"
+                remaining_args+=("$1")
                 shift
                 ;;
         esac
     done
+    
+    # Second pass: check for RIR shortcut syntax in remaining args
+    # e.g., rdap ripe entity ORG-HS382-RIPE
+    if [ ${#remaining_args[@]} -ge 1 ]; then
+        local first_arg="${remaining_args[0]}"
+        case "$first_arg" in
+            ripe|RIPE)
+                [ -z "$SERVER" ] && SERVER="https://rdap.db.ripe.net"
+                remaining_args=("${remaining_args[@]:1}")
+                if [ ${#remaining_args[@]} -ge 1 ]; then
+                    case "${remaining_args[0]}" in
+                        entity|ip|asn|autnum|domain|help|domain-search|entity-search|entity-search-by-handle)
+                            [ -z "$QUERY_TYPE" ] && QUERY_TYPE="${remaining_args[0]}"
+                            remaining_args=("${remaining_args[@]:1}")
+                            ;;
+                    esac
+                fi
+                ;;
+            arin|ARIN)
+                [ -z "$SERVER" ] && SERVER="https://rdap.arin.net/registry"
+                remaining_args=("${remaining_args[@]:1}")
+                if [ ${#remaining_args[@]} -ge 1 ]; then
+                    case "${remaining_args[0]}" in
+                        entity|ip|asn|autnum|domain|help|entity-search|entity-search-by-handle)
+                            [ -z "$QUERY_TYPE" ] && QUERY_TYPE="${remaining_args[0]}"
+                            remaining_args=("${remaining_args[@]:1}")
+                            ;;
+                    esac
+                fi
+                ;;
+            apnic|APNIC)
+                [ -z "$SERVER" ] && SERVER="https://rdap.apnic.net"
+                remaining_args=("${remaining_args[@]:1}")
+                if [ ${#remaining_args[@]} -ge 1 ]; then
+                    case "${remaining_args[0]}" in
+                        entity|ip|asn|autnum|domain|help)
+                            [ -z "$QUERY_TYPE" ] && QUERY_TYPE="${remaining_args[0]}"
+                            remaining_args=("${remaining_args[@]:1}")
+                            ;;
+                    esac
+                fi
+                ;;
+            lacnic|LACNIC)
+                [ -z "$SERVER" ] && SERVER="https://rdap.lacnic.net/rdap"
+                remaining_args=("${remaining_args[@]:1}")
+                if [ ${#remaining_args[@]} -ge 1 ]; then
+                    case "${remaining_args[0]}" in
+                        entity|ip|asn|autnum|domain|help)
+                            [ -z "$QUERY_TYPE" ] && QUERY_TYPE="${remaining_args[0]}"
+                            remaining_args=("${remaining_args[@]:1}")
+                            ;;
+                    esac
+                fi
+                ;;
+            afrinic|AFRINIC)
+                [ -z "$SERVER" ] && SERVER="https://rdap.afrinic.net/rdap"
+                remaining_args=("${remaining_args[@]:1}")
+                if [ ${#remaining_args[@]} -ge 1 ]; then
+                    case "${remaining_args[0]}" in
+                        entity|ip|asn|autnum|domain|help)
+                            [ -z "$QUERY_TYPE" ] && QUERY_TYPE="${remaining_args[0]}"
+                            remaining_args=("${remaining_args[@]:1}")
+                            ;;
+                    esac
+                fi
+                ;;
+        esac
+    fi
+    
+    # Set QUERY from remaining args
+    [ ${#remaining_args[@]} -ge 1 ] && QUERY="${remaining_args[0]}"
     
     [ -z "$QUERY" ] && [ -z "$QUERY_TYPE" ] && usage
     [ -z "$QUERY" ] && [ "$QUERY_TYPE" != "help" ] && usage
