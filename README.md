@@ -202,9 +202,11 @@ rdap ripe entity-search 'Host.AL'
 **Supported RIRs for shortcuts:** `ripe`, `arin`, `apnic`, `lacnic`, `afrinic`
 
 ```bash
-# More shortcut examples
-rdap arin entity ARIN
-rdap apnic ip 1.1.1.1
+# ARIN shortcuts (Americas)
+rdap arin entity ZT-75              # Osir, Inc.
+rdap arin ip 23.134.52.1
+rdap arin ip 130.12.209.1
+rdap arin asn AS11867
 ```
 
 **Traditional syntax** (still works):
