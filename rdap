@@ -856,10 +856,38 @@ format_ip_brief() {
     [ -n "$created" ] && printf "%bRegistered:%b  %s\n" "$GREEN" "$NC" "$created"
     [ -n "$updated" ] && printf "%bUpdated:%b     %s\n" "$GREEN" "$NC" "$updated"
     
-    # Organization info - extract from registrant entity
-    local org_entity=$(echo "$json" | jq -r '
-        [.entities[]? | select(.roles[]? == "registrant" or .roles[]? == "holder")] | .[0]
-    ' 2>/dev/null)
+    # Recursive function to find entity by role at any nesting level
+    # ARIN nests entities up to 3 levels deep
+    find_entity_by_role() {
+        local search_json="$1"
+        local role="$2"
+        echo "$search_json" | jq -r --arg role "$role" '
+            # Function to recursively search entities
+            def find_by_role($r):
+                if . == null then empty
+                elif type == "array" then .[] | find_by_role($r)
+                elif type == "object" then
+                    if (.roles // []) | any(. == $r) then .
+                    else (.entities // []) | find_by_role($r)
+                    end
+                else empty
+                end;
+            [.entities // [] | find_by_role($role)] | .[0] // null
+        ' 2>/dev/null
+    }
+    
+    # Find the main organization (registrant) - may be nested
+    local org_entity=$(find_entity_by_role "$json" "registrant")
+    
+    # For ARIN, check if there's a nested registrant with more info (like ZT-75 inside C11401345)
+    if [ -n "$org_entity" ] && [ "$org_entity" != "null" ]; then
+        local nested_org=$(echo "$org_entity" | jq -r '[.entities[]? | select(.roles[]? == "registrant")] | .[0] // null' 2>/dev/null)
+        if [ -n "$nested_org" ] && [ "$nested_org" != "null" ]; then
+            # Use the nested org as the main one, but keep the outer for context
+            local outer_org_name=$(echo "$org_entity" | jq -r '[.vcardArray[1][]? | select(.[0] == "fn") | .[3]] | .[0] // empty')
+            org_entity="$nested_org"
+        fi
+    fi
     
     if [ -n "$org_entity" ] && [ "$org_entity" != "null" ]; then
         local org_name=$(echo "$org_entity" | jq -r '[.vcardArray[1][]? | select(.[0] == "fn") | .[3]] | .[0] // empty')
@@ -874,23 +902,7 @@ format_ip_brief() {
             local addr_label=$(echo "$org_entity" | jq -r '[.vcardArray[1][]? | select(.[0] == "adr") | .[1].label] | .[0] // empty' 2>/dev/null)
             if [ -n "$addr_label" ] && [ "$addr_label" != "null" ]; then
                 printf "  %bAddress:%b     %s\n" "$GREEN" "$NC" "$(echo "$addr_label" | tr '\n' ', ' | sed 's/, *$//')"
-            else
-                # Try structured address
-                local addr=$(echo "$org_entity" | jq -r '
-                    [.vcardArray[1][]? | select(.[0] == "adr")] | .[0] | 
-                    if . then 
-                        [.[3][0], .[3][1], .[3][2], .[3][3], .[3][4], .[3][5], .[3][6]] | 
-                        map(select(. != null and . != "")) | join(", ")
-                    else null end
-                ' 2>/dev/null)
-                [ -n "$addr" ] && [ "$addr" != "null" ] && [ "$addr" != "" ] && printf "  %bAddress:%b     %s\n" "$GREEN" "$NC" "$addr"
             fi
-            
-            # Country from org entity
-            local country=$(echo "$org_entity" | jq -r '
-                [.vcardArray[1][]? | select(.[0] == "adr") | .[3][6]] | .[0] // empty
-            ' 2>/dev/null)
-            [ -n "$country" ] && [ "$country" != "null" ] && printf "  %bCountry:%b     %s\n" "$GREEN" "$NC" "$country"
         fi
     fi
     
@@ -900,85 +912,50 @@ format_ip_brief() {
         [ -n "$country" ] && printf "%bCountry:%b     %s\n" "$GREEN" "$NC" "$country"
     fi
     
-    # Abuse contact - very important!
-    local abuse_entity=$(echo "$json" | jq -r '
-        [.entities[]? | select(.roles[]? == "abuse")] | .[0]
-    ' 2>/dev/null)
-    
-    if [ -n "$abuse_entity" ] && [ "$abuse_entity" != "null" ]; then
-        local abuse_name=$(echo "$abuse_entity" | jq -r '[.vcardArray[1][]? | select(.[0] == "fn") | .[3]] | .[0] // empty')
-        local abuse_email=$(echo "$abuse_entity" | jq -r '[.vcardArray[1][]? | select(.[0] == "email") | .[3]] | .[0] // empty')
-        local abuse_phone=$(echo "$abuse_entity" | jq -r '[.vcardArray[1][]? | select(.[0] == "tel") | .[3]] | .[0] // empty')
-        local abuse_handle=$(echo "$abuse_entity" | jq -r '.handle // empty')
+    # Helper function to display a contact
+    display_contact() {
+        local entity="$1"
+        local title="$2"
         
-        if [ -n "$abuse_email" ] || [ -n "$abuse_name" ]; then
-            printf "\n%bAbuse Contact%b\n" "$CYAN" "$NC"
-            [ -n "$abuse_handle" ] && printf "  %bHandle:%b      %s\n" "$GREEN" "$NC" "$abuse_handle"
-            [ -n "$abuse_name" ] && printf "  %bName:%b        %s\n" "$GREEN" "$NC" "$abuse_name"
-            [ -n "$abuse_email" ] && printf "  %bEmail:%b       %s\n" "$GREEN" "$NC" "$abuse_email"
-            [ -n "$abuse_phone" ] && printf "  %bPhone:%b       %s\n" "$GREEN" "$NC" "$abuse_phone"
+        if [ -n "$entity" ] && [ "$entity" != "null" ]; then
+            local name=$(echo "$entity" | jq -r '[.vcardArray[1][]? | select(.[0] == "fn") | .[3]] | .[0] // empty')
+            local email=$(echo "$entity" | jq -r '[.vcardArray[1][]? | select(.[0] == "email") | .[3]] | .[0] // empty')
+            local phone=$(echo "$entity" | jq -r '[.vcardArray[1][]? | select(.[0] == "tel") | .[3]] | .[0] // empty')
+            local handle=$(echo "$entity" | jq -r '.handle // empty')
+            
+            if [ -n "$email" ] || [ -n "$name" ]; then
+                printf "\n%b%s%b\n" "$CYAN" "$title" "$NC"
+                [ -n "$handle" ] && printf "  %bHandle:%b      %s\n" "$GREEN" "$NC" "$handle"
+                [ -n "$name" ] && printf "  %bName:%b        %s\n" "$GREEN" "$NC" "$name"
+                [ -n "$email" ] && printf "  %bEmail:%b       %s\n" "$GREEN" "$NC" "$email"
+                [ -n "$phone" ] && printf "  %bPhone:%b       %s\n" "$GREEN" "$NC" "$phone"
+            fi
         fi
+    }
+    
+    # Find and display contacts - search recursively through all nesting levels
+    local abuse_entity=$(find_entity_by_role "$json" "abuse")
+    display_contact "$abuse_entity" "Abuse Contact"
+    
+    local tech_entity=$(find_entity_by_role "$json" "technical")
+    display_contact "$tech_entity" "Technical Contact"
+    
+    local admin_entity=$(find_entity_by_role "$json" "administrative")
+    display_contact "$admin_entity" "Administrative Contact"
+    
+    local noc_entity=$(find_entity_by_role "$json" "noc")
+    display_contact "$noc_entity" "NOC Contact"
+    
+    local dns_entity=$(find_entity_by_role "$json" "dns")
+    # Only show DNS if different from technical
+    local dns_handle=$(echo "$dns_entity" | jq -r '.handle // empty' 2>/dev/null)
+    local tech_handle=$(echo "$tech_entity" | jq -r '.handle // empty' 2>/dev/null)
+    if [ -n "$dns_entity" ] && [ "$dns_entity" != "null" ] && [ "$dns_handle" != "$tech_handle" ]; then
+        display_contact "$dns_entity" "DNS Contact"
     fi
     
-    # Technical contact
-    local tech_entity=$(echo "$json" | jq -r '
-        [.entities[]? | select(.roles[]? == "technical")] | .[0]
-    ' 2>/dev/null)
-    
-    if [ -n "$tech_entity" ] && [ "$tech_entity" != "null" ]; then
-        local tech_name=$(echo "$tech_entity" | jq -r '[.vcardArray[1][]? | select(.[0] == "fn") | .[3]] | .[0] // empty')
-        local tech_email=$(echo "$tech_entity" | jq -r '[.vcardArray[1][]? | select(.[0] == "email") | .[3]] | .[0] // empty')
-        local tech_phone=$(echo "$tech_entity" | jq -r '[.vcardArray[1][]? | select(.[0] == "tel") | .[3]] | .[0] // empty')
-        local tech_handle=$(echo "$tech_entity" | jq -r '.handle // empty')
-        
-        if [ -n "$tech_email" ] || [ -n "$tech_name" ]; then
-            printf "\n%bTechnical Contact%b\n" "$CYAN" "$NC"
-            [ -n "$tech_handle" ] && printf "  %bHandle:%b      %s\n" "$GREEN" "$NC" "$tech_handle"
-            [ -n "$tech_name" ] && printf "  %bName:%b        %s\n" "$GREEN" "$NC" "$tech_name"
-            [ -n "$tech_email" ] && printf "  %bEmail:%b       %s\n" "$GREEN" "$NC" "$tech_email"
-            [ -n "$tech_phone" ] && printf "  %bPhone:%b       %s\n" "$GREEN" "$NC" "$tech_phone"
-        fi
-    fi
-    
-    # Administrative contact
-    local admin_entity=$(echo "$json" | jq -r '
-        [.entities[]? | select(.roles[]? == "administrative")] | .[0]
-    ' 2>/dev/null)
-    
-    if [ -n "$admin_entity" ] && [ "$admin_entity" != "null" ]; then
-        local admin_name=$(echo "$admin_entity" | jq -r '[.vcardArray[1][]? | select(.[0] == "fn") | .[3]] | .[0] // empty')
-        local admin_email=$(echo "$admin_entity" | jq -r '[.vcardArray[1][]? | select(.[0] == "email") | .[3]] | .[0] // empty')
-        local admin_phone=$(echo "$admin_entity" | jq -r '[.vcardArray[1][]? | select(.[0] == "tel") | .[3]] | .[0] // empty')
-        local admin_handle=$(echo "$admin_entity" | jq -r '.handle // empty')
-        
-        if [ -n "$admin_email" ] || [ -n "$admin_name" ]; then
-            printf "\n%bAdministrative Contact%b\n" "$CYAN" "$NC"
-            [ -n "$admin_handle" ] && printf "  %bHandle:%b      %s\n" "$GREEN" "$NC" "$admin_handle"
-            [ -n "$admin_name" ] && printf "  %bName:%b        %s\n" "$GREEN" "$NC" "$admin_name"
-            [ -n "$admin_email" ] && printf "  %bEmail:%b       %s\n" "$GREEN" "$NC" "$admin_email"
-            [ -n "$admin_phone" ] && printf "  %bPhone:%b       %s\n" "$GREEN" "$NC" "$admin_phone"
-        fi
-    fi
-    
-    # NOC contact (if present, common in ARIN)
-    local noc_entity=$(echo "$json" | jq -r '
-        [.entities[]? | select(.roles[]? == "noc")] | .[0]
-    ' 2>/dev/null)
-    
-    if [ -n "$noc_entity" ] && [ "$noc_entity" != "null" ]; then
-        local noc_name=$(echo "$noc_entity" | jq -r '[.vcardArray[1][]? | select(.[0] == "fn") | .[3]] | .[0] // empty')
-        local noc_email=$(echo "$noc_entity" | jq -r '[.vcardArray[1][]? | select(.[0] == "email") | .[3]] | .[0] // empty')
-        local noc_phone=$(echo "$noc_entity" | jq -r '[.vcardArray[1][]? | select(.[0] == "tel") | .[3]] | .[0] // empty')
-        local noc_handle=$(echo "$noc_entity" | jq -r '.handle // empty')
-        
-        if [ -n "$noc_email" ] || [ -n "$noc_name" ]; then
-            printf "\n%bNOC Contact%b\n" "$CYAN" "$NC"
-            [ -n "$noc_handle" ] && printf "  %bHandle:%b      %s\n" "$GREEN" "$NC" "$noc_handle"
-            [ -n "$noc_name" ] && printf "  %bName:%b        %s\n" "$GREEN" "$NC" "$noc_name"
-            [ -n "$noc_email" ] && printf "  %bEmail:%b       %s\n" "$GREEN" "$NC" "$noc_email"
-            [ -n "$noc_phone" ] && printf "  %bPhone:%b       %s\n" "$GREEN" "$NC" "$noc_phone"
-        fi
-    fi
+    local routing_entity=$(find_entity_by_role "$json" "routing")
+    display_contact "$routing_entity" "Routing Contact"
     
     # RDAP link for more info
     local rdap_link=$(echo "$json" | jq -r '[.links[]? | select(.rel == "self") | .href] | .[0] // empty')
