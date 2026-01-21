@@ -683,7 +683,18 @@ format_domain_brief() {
     printf "────────────────────────────────────────\n"
     
     local name=$(echo "$json" | jq -r '.ldhName // .handle // "N/A"')
-    local status=$(echo "$json" | jq -r 'if .status then .status | join(", ") else "N/A" end')
+    # Normalize EPP status codes to standard camelCase format
+    # Verisign returns "client transfer prohibited", standard is "clientTransferProhibited"
+    local status=$(echo "$json" | jq -r '
+        if .status then 
+            .status | map(
+                # Convert space-separated words to camelCase
+                gsub(" (?<c>[a-z])"; "\(.c | ascii_upcase)") |
+                # Also handle already camelCase (no change needed)
+                .
+            ) | join(", ")
+        else "N/A" end
+    ')
     local created=$(echo "$json" | jq -r '[.events[]? | select(.eventAction == "registration")] | .[0].eventDate // empty')
     local expires=$(echo "$json" | jq -r '[.events[]? | select(.eventAction == "expiration" or .eventAction == "registrar expiration")] | .[0].eventDate // empty')
     local updated=$(echo "$json" | jq -r '[.events[]? | select(.eventAction == "last changed")] | .[0].eventDate // empty')
@@ -737,8 +748,8 @@ format_domain_full() {
     local handle=$(echo "$json" | jq -r '.handle // empty')
     [ -n "$handle" ] && printf "  Handle: %s\n" "$handle"
     
-    # Status
-    echo "$json" | jq -r '.status[]? // empty' 2>/dev/null | while read status; do
+    # Status - normalize to camelCase
+    echo "$json" | jq -r '.status[]? // empty | gsub(" (?<c>[a-z])"; "\(.c | ascii_upcase)")' 2>/dev/null | while read status; do
         [ -n "$status" ] && printf "  Status: %s\n" "$status"
     done
     
